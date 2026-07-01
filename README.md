@@ -14,13 +14,36 @@ On top of that, a **DAQ Chart** panel (daqIDEA-style data acquisition) records v
 - **Works without non-stop mode** — when GDB cannot evaluate while the target runs, the extension transparently performs *sampling cycles*: pause → read all expressions → continue. Pauses are typically only a few milliseconds.
 - **Auto mode** — tries direct (non-stop) evaluation first and automatically falls back to sampling if the adapter/target rejects it.
 - **Familiar watch functionality** — add / edit / remove / remove-all expressions, expand structs, arrays and pointers, copy value / copy expression, hex display toggle, change highlighting (yellow dot when a value changed since the last poll), error display for invalid expressions.
+- **Watch groups** — organize expressions into named, collapsible folders (toolbar *Add Group*, then *Add Expression to Group* / *Move to Group...*). Save and load the whole watch list (groups + expressions) as JSON for reuse across sessions and machines.
+- **Per-expression display format** — right-click an expression → *Set Display Format...* for natural / decimal / hex / octal / binary, or *Set Scale / Unit...* to show `raw * scale + offset` with a unit label (e.g. read a fixed-point integer as `12.5 V`). Overrides the global hex toggle per row.
+- **Copy for reports** — *Copy Value with Timestamp* and *Copy All as Table* (tab-separated snapshot of every group/expression).
 - **Set Value** — write a new value to any expression or expanded struct/array member (right-click → *Set Value*, or the pencil icon on members). Works while the target is running too: in non-stop mode the value is written directly; otherwise the extension performs a single pause → write → continue cycle.
 - **Adapter agnostic** — talks plain DAP to the active debug session, so it works with `cppdbg` (ms-vscode.cpptools), `cortex-debug`, and other GDB-based debug adapters.
 - **Persistent expressions** — watch expressions are stored per workspace and survive restarts.
 
+## One-click attach
+
+The **Attach GDB to Running Process** button (plug icon) in the **Live Watch (GDB)** view title — also available as the `GDB Live Watch: Attach GDB to Running Process` command — starts a `cppdbg` GDB *attach* session in a single click, with no process picker and no `${command:pickProcess}` prompt.
+
+**No `launch.json` is required.** The extension builds the `cppdbg` attach configuration directly from the settings below: it finds the most recently started process matching `processName`, resolves its executable, and attaches using your `miDebuggerPath` and `setupCommands`. The Live Watch, Symbols and DAQ panels come up through the normal session lifecycle.
+
+Optionally, set `gdbLiveWatch.autoAttach.configName` to reuse a named attach configuration from `launch.json` instead of the settings.
+
+| Setting | Default | Description |
+|---|---|---|
+| `gdbLiveWatch.autoAttach.processName` | `VeosVpuHost.exe` | Image name to attach to (trailing `.exe` optional). Empty = derived from `program`. |
+| `gdbLiveWatch.autoAttach.miDebuggerPath` | `C:/winIDEA/gdb_multiarch/gdb.exe` | Path to the GDB executable. Empty = use the GDB bundled with the C/C++ extension. |
+| `gdbLiveWatch.autoAttach.program` | `""` | Optional executable path. Empty = resolved from the running process. |
+| `gdbLiveWatch.autoAttach.setupCommands` | enable pretty-printing | GDB `setupCommands` sent on attach. |
+| `gdbLiveWatch.autoAttach.configName` | `""` | Optional name of a `launch.json` attach config to reuse instead of the settings. |
+
+> Windows-only (uses a CIM/PowerShell query to locate the process). Requires the C/C++ extension (`cppdbg`) and a working GDB.
+
+
+
 ## Usage
 
-1. Start your GDB debug session as usual (e.g. a `cppdbg` *attach* or *launch* configuration targeting your VEOS host application via `gdbserver`/remote GDB).
+1. Start your GDB debug session as usual (e.g. a `cppdbg` *attach* or *launch* configuration targeting your VEOS host application via `gdbserver`/remote GDB) — or just use the **Attach GDB to Running Process** button above.
 2. Open the **Live Watch (GDB)** view in the Run & Debug sidebar.
 3. Add expressions with the **+** button (or right-click a selection in the editor → *Add Selection to Live Watch*).
 4. Polling starts automatically with the session (configurable). Use the play/pause button in the view title or the status bar item to toggle it.
@@ -32,10 +55,14 @@ While the target is **running**, expressions must be resolvable without a stack 
 The **Symbols (GDB)** view (Run & Debug sidebar) browses the symbol table that GDB loaded from the target (e.g. `VECU.dll`), similar to winIDEA's Symbol Browser:
 
 - **Categories** — *Variables*, *Constants* (`const` variables), *Functions* and *Types*, grouped by source file (module), with declaration and line info.
-- **Loaded once, cached for the session** — the full table is read automatically when the debug session starts (via `info variables` / `info functions` / `info types`, using a sampling cycle if the target is running) and kept in memory. Use **Reload Symbols** (refresh icon) only if the symbol file changed.
-- **Live filtering as you type** — the filter icon opens an input that narrows the symbol tree on every keystroke (plain substring or regular expression, matched locally against the cached table — no GDB round-trips). Matches auto-expand while a filter is active. Press *Enter* to keep the filter, *Esc* to restore the previous one.
+- **Loaded once, cached for the session** — the full table is read automatically when the debug session starts (via `info variables` / `info functions`, using a sampling cycle if the target is running) and kept in memory. Use **Reload Symbols** (refresh icon) only if the symbol file changed.
+- **Filtering with a GDB-side query** — the filter icon opens an input that narrows any already-loaded table on every keystroke for quick preview. Press *Enter* to ask GDB for `info variables/functions REGEXP`, so selective name filters reduce the symbol query itself instead of loading everything and hiding rows afterward.
+- **Source-path filters reduce memory, not the GDB round-trip** — the include/exclude source-path settings (and the automatic dSPACE-model scope) are applied while parsing GDB's response, so excluded files are never held in memory or written to the on-disk cache; changing them re-parses the already-fetched listing instead of re-querying GDB. GDB's `info variables`/`info functions` have no file-scoping option of their own, so the query itself always enumerates the whole symbol table first - the Enter-to-filter *name* query is the only thing that can actually shrink that GDB-side cost.
 - **Go to source** — click a symbol (or use the go-to icon) to open its declaration. Compile-time paths that don't exist locally are resolved by searching the workspace.
 - **Add to Live Watch** — the eye icon (or context menu) adds the symbol to the Live Watch panel, like winIDEA's double-click-to-watch.
+- **Bulk add** — the symbol tree supports multi-selection (Ctrl/Shift-click), so *Add to Live Watch* / *Add to DAQ Chart* can add many symbols at once.
+- **Favorites** — star symbols (the star icon / context menu) to collect them under a *Favorites* category at the top of the tree; favorites persist per workspace.
+- **Filter history** — the history icon offers recently used filters for quick re-use.
 
 Symbol browser settings:
 
@@ -56,6 +83,10 @@ Open it with the chart icon in the **Live Watch (GDB)** view title or the **GDB 
   - **drag** pans, **double-click** (or the *Fit* button) returns to auto-follow.
   - Dense data is automatically decimated (min/max per pixel column) so the chart stays responsive with 100k+ samples.
 - **Configurable sampling period** — `max`, `1 ms`, `10 ms`, `100 ms`, `1 s`. `max` acquires back-to-back as fast as the debug adapter allows. Short periods are an upper bound: the real achievable rate depends on the GDB round-trip (non-stop direct reads are fastest; pause→read→continue sampling is slower). The status bar in the panel shows the actually achieved rate.
+- **Trigger mode (scope-style)** — enable the *Trigger* bar to capture around an event instead of logging continuously. Pick a source variable, edge (rising / falling / both), level, and a pre-trigger percentage; acquisition keeps a rolling pre-trigger buffer and commits a fixed window once the source crosses the level. Modes: *single* (stop after one capture), *normal* (re-arm for the next event), *auto* (free-run if no event occurs). The trigger level and instant are drawn on the chart.
+- **Measurement cursors** — the *Cursors* button enables click-to-place A/B cursors with a live readout of value-at-cursor, Δt, Δvalue, and min/max/mean over the selected range.
+- **Theming & style** — the chart follows the VS Code light/dark theme; line width and per-sample markers are configurable (`gdbDaq.lineWidth`, `gdbDaq.showMarkers`).
+- **Copy to clipboard** — *Copy Table* puts all acquired samples on the clipboard as tab-separated text for pasting into reports/spreadsheets.
 - **Data table** — in the lower right corner; the first column is the sample time, every other column is one variable, every row is one acquired sample (newest on top) for reading precise values.
 - **Export acquired data** — *Export…* writes all samples to a `.csv` (Excel-compatible) or tab-separated `.txt` file.
 - **Variable configuration files** — *Save Config…* / *Load Config…* store the variable list and sampling period as JSON, so acquisition setups can be shared and reused. The current configuration is also persisted per workspace automatically.
@@ -64,6 +95,8 @@ Open it with the chart icon in the **Live Watch (GDB)** view title or the **GDB 
 | Setting | Default | Description |
 |---|---|---|
 | `gdbDaq.maxSamples` | `100000` | Ring buffer size per variable; oldest samples are discarded when full. |
+| `gdbDaq.lineWidth` | `1.25` | Line width (px) for the chart traces. |
+| `gdbDaq.showMarkers` | `true` | Draw a dot at each acquired sample when the data is sparse enough. |
 
 Like the Live Watch, acquisition works both with GDB non-stop targets (zero intrusion) and plain all-stop targets via transparent pause→read→continue sampling cycles.
 
@@ -74,6 +107,7 @@ Like the Live Watch, acquisition works both with GDB non-stop targets (zero intr
 | `auto` (default) | Try direct evaluation on the running target; if it fails, permanently switch this session to sampling. |
 | `nonStop` | Always evaluate directly. Requires GDB non-stop / async mode. |
 | `sample` | Always use pause → read → continue cycles. Use this when non-stop is not supported (typical for VEOS host debugging). |
+| `stoppedOnly` | **Never pause a running target.** Values only refresh while the target is stopped (breakpoint/step). The extension issues no interrupts at all — use this for unattended/overnight runs on native-Windows GDB where the pause/break-in race can crash the cppdbg debug engine. |
 
 Sampling details:
 
@@ -83,6 +117,33 @@ Sampling details:
 
 > Tip: sampling makes the debugger briefly enter the "stopped" state, which by default moves editor focus. Set `"debug.focusEditorOnBreak": false` in your settings to avoid flicker.
 
+## Troubleshooting: sampling crashes on Windows ("Failed to find thread … for break event")
+
+On **native Windows GDB** (e.g. attaching directly to a VEOS host process such as `VeosVpuHost.exe` with `cppdbg`), a sampling pause is implemented by Windows injecting a transient *break-in* thread that runs `ntdll!DbgBreakPoint`. You may see this in the GDB console:
+
+```
+Thread NNNN received signal SIGTRAP, Trace/breakpoint trap.
+0x... in ntdll!DbgBreakPoint () from C:\Windows\SYSTEM32\ntdll.dll
+[Thread ... exited with code 0]
+ERROR: Error while trying to enter break state. Debugging will now stop. Failed to find thread NNNN for break event
+```
+
+GDB stops on that break-in thread and it exits immediately, so the **cppdbg (MIEngine) debug engine** can fail to build the break state and tears the whole session down. A related, recoverable symptom is `cannot execute this command without a live selective thread`, when the thread GDB had selected exited during a pause.
+
+This is a known interaction between MIEngine and native-Windows GDB — it is triggered *by the act of pausing*, not by your program. The extension mitigates it as much as an extension can:
+
+- It never adopts the transient break-in thread (or a short-lived worker thread) as the thread it reads from, and re-selects a live thread + retries when GDB's selected thread becomes stale.
+- It **guarantees the target is resumed** after every sampling pause (with retries and a thread-less fallback), so a failed `continue` can no longer silently leave your program halted.
+- It detects the fatal break-state error and a non-resuming target, then **stops all sampling automatically** and offers to switch to safe mode, instead of piling more pauses onto a dying session.
+
+For **zero tolerance on unattended/overnight runs**, choose one of:
+
+1. **`"gdbLiveWatch.mode": "stoppedOnly"`** — the extension never interrupts the running target; values refresh whenever your test naturally stops (breakpoint/step). This removes the trigger completely. Live-while-running values are unavailable in this mode.
+2. **Enable GDB non-stop mode** (if your target/gdbserver supports it) so values are read with zero pauses — see the VEOS notes below.
+3. **Use a newer GDB** where the windows-nat break-in handling is fixed.
+
+If you must sample while running, keep `gdbLiveWatch.adaptivePolling` on and use a larger `gdbLiveWatch.pollingInterval` (and DAQ period) to minimize the number of interrupts.
+
 ## Settings
 
 | Setting | Default | Description |
@@ -90,8 +151,11 @@ Sampling details:
 | `gdbLiveWatch.pollingInterval` | `1000` | Refresh interval in ms (min 100). |
 | `gdbLiveWatch.mode` | `auto` | `auto` / `nonStop` / `sample` (see above). |
 | `gdbLiveWatch.autoStartPolling` | `true` | Start polling automatically when a debug session starts. |
+| `gdbLiveWatch.adaptivePolling` | `true` | When sampling, automatically stretch the interval so the target is paused at most ~20% of the time (avoids choking timing-sensitive models). |
 | `gdbLiveWatch.maxChildren` | `100` | Max children shown when expanding a variable. |
-| `gdbLiveWatch.hexFormat` | `false` | Display values in hexadecimal. |
+| `gdbLiveWatch.hexFormat` | `false` | Default hex display for expressions without a per-expression format. |
+
+The status bar item distinguishes the live state: *live* (direct non-stop reads), *sampling* (pause→read→continue, with the per-cycle pause cost and any adaptive back-off in the tooltip), *stopped* (at a breakpoint), or *off*.
 
 ## VEOS notes
 

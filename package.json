@@ -36,10 +36,22 @@
       },
       {
         "view": "gdbSymbols",
-        "contents": "Browse the variables, functions, constants and types of the debugged target.\nSymbols are loaded automatically when a debug session starts and kept cached; filtering is instant and local.\n[Load Symbols](command:gdbSymbols.load)"
+        "contents": "Browse the variables, functions, constants and types of the debugged target.\nSymbols are loaded automatically when a debug session starts and kept cached; press Enter in the filter box to run a narrower GDB query.\n[Load Symbols](command:gdbSymbols.load)"
       }
     ],
     "commands": [
+      {
+        "command": "gdbLiveWatch.attachToProcess",
+        "title": "Attach GDB to Running Process",
+        "category": "GDB Live Watch",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "gdbLiveWatch.configure",
+        "title": "Configure Extension",
+        "category": "GDB Live Watch",
+        "icon": "$(gear)"
+      },
       {
         "command": "gdbLiveWatch.addExpression",
         "title": "Add Expression",
@@ -86,6 +98,17 @@
         "category": "GDB Live Watch"
       },
       {
+        "command": "gdbLiveWatch.copyValueWithTimestamp",
+        "title": "Copy Value with Timestamp",
+        "category": "GDB Live Watch"
+      },
+      {
+        "command": "gdbLiveWatch.copyAsTable",
+        "title": "Copy All as Table",
+        "category": "GDB Live Watch",
+        "icon": "$(table)"
+      },
+      {
         "command": "gdbLiveWatch.refresh",
         "title": "Refresh Now",
         "category": "GDB Live Watch",
@@ -112,6 +135,62 @@
       {
         "command": "gdbLiveWatch.toggleHexFormat",
         "title": "Toggle Hex Display",
+        "category": "GDB Live Watch"
+      },
+      {
+        "command": "gdbLiveWatch.addGroup",
+        "title": "Add Group",
+        "category": "GDB Live Watch",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "gdbLiveWatch.addExpressionToGroup",
+        "title": "Add Expression to Group",
+        "category": "GDB Live Watch",
+        "icon": "$(add)"
+      },
+      {
+        "command": "gdbLiveWatch.renameGroup",
+        "title": "Rename Group",
+        "category": "GDB Live Watch",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "gdbLiveWatch.removeGroup",
+        "title": "Remove Group",
+        "category": "GDB Live Watch",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "gdbLiveWatch.moveToGroup",
+        "title": "Move to Group...",
+        "category": "GDB Live Watch"
+      },
+      {
+        "command": "gdbLiveWatch.saveWatchList",
+        "title": "Save Watch List...",
+        "category": "GDB Live Watch",
+        "icon": "$(save)"
+      },
+      {
+        "command": "gdbLiveWatch.loadWatchList",
+        "title": "Load Watch List...",
+        "category": "GDB Live Watch",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "gdbLiveWatch.setFormat",
+        "title": "Set Display Format...",
+        "category": "GDB Live Watch"
+      },
+      {
+        "command": "gdbLiveWatch.setScaleUnit",
+        "title": "Set Scale / Unit...",
+        "category": "GDB Live Watch"
+      },
+      {
+        "command": "gdbLiveWatch.clearFormat",
+        "title": "Clear Display Format",
         "category": "GDB Live Watch"
       },
       {
@@ -150,6 +229,36 @@
         "category": "GDB Symbols"
       },
       {
+        "command": "gdbSymbols.toggleFavorite",
+        "title": "Toggle Favorite",
+        "category": "GDB Symbols",
+        "icon": "$(star)"
+      },
+      {
+        "command": "gdbSymbols.filterHistory",
+        "title": "Recent Filters...",
+        "category": "GDB Symbols",
+        "icon": "$(history)"
+      },
+      {
+        "command": "gdbSymbols.showSourceFiles",
+        "title": "Show Source Files",
+        "category": "GDB Symbols",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "gdbSymbols.configureSourcePathFilter",
+        "title": "Filter Symbols by Source Path...",
+        "category": "GDB Symbols",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "gdbSymbols.configureSourcePathExclude",
+        "title": "Exclude Symbols by Source Path...",
+        "category": "GDB Symbols",
+        "icon": "$(exclude)"
+      },
+      {
         "command": "gdbDaq.open",
         "title": "Open DAQ Chart",
         "category": "GDB DAQ",
@@ -171,7 +280,22 @@
     "menus": {
       "view/title": [
         {
+          "command": "gdbLiveWatch.attachToProcess",
+          "when": "view == gdbLiveWatch",
+          "group": "navigation@0"
+        },
+        {
+          "command": "gdbLiveWatch.configure",
+          "when": "view == gdbLiveWatch",
+          "group": "settings@0"
+        },
+        {
           "command": "gdbLiveWatch.addExpression",
+          "when": "view == gdbLiveWatch",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gdbLiveWatch.addGroup",
           "when": "view == gdbLiveWatch",
           "group": "navigation@1"
         },
@@ -211,6 +335,21 @@
           "group": "settings@2"
         },
         {
+          "command": "gdbLiveWatch.saveWatchList",
+          "when": "view == gdbLiveWatch",
+          "group": "settings@3"
+        },
+        {
+          "command": "gdbLiveWatch.loadWatchList",
+          "when": "view == gdbLiveWatch",
+          "group": "settings@4"
+        },
+        {
+          "command": "gdbLiveWatch.copyAsTable",
+          "when": "view == gdbLiveWatch",
+          "group": "settings@5"
+        },
+        {
           "command": "gdbSymbols.search",
           "when": "view == gdbSymbols",
           "group": "navigation@1"
@@ -221,12 +360,62 @@
           "group": "navigation@2"
         },
         {
-          "command": "gdbSymbols.load",
+          "command": "gdbSymbols.filterHistory",
           "when": "view == gdbSymbols",
           "group": "navigation@3"
+        },
+        {
+          "command": "gdbSymbols.load",
+          "when": "view == gdbSymbols",
+          "group": "navigation@4"
+        },
+        {
+          "command": "gdbSymbols.showSourceFiles",
+          "when": "view == gdbSymbols",
+          "group": "settings@1"
+        },
+        {
+          "command": "gdbSymbols.configureSourcePathFilter",
+          "when": "view == gdbSymbols",
+          "group": "settings@2"
+        },
+        {
+          "command": "gdbSymbols.configureSourcePathExclude",
+          "when": "view == gdbSymbols",
+          "group": "settings@3"
         }
       ],
       "view/item/context": [
+        {
+          "command": "gdbLiveWatch.addExpressionToGroup",
+          "when": "view == gdbLiveWatch && viewItem == gdbLiveWatch.group",
+          "group": "inline@1"
+        },
+        {
+          "command": "gdbLiveWatch.renameGroup",
+          "when": "view == gdbLiveWatch && viewItem == gdbLiveWatch.group",
+          "group": "inline@2"
+        },
+        {
+          "command": "gdbLiveWatch.removeGroup",
+          "when": "view == gdbLiveWatch && viewItem == gdbLiveWatch.group",
+          "group": "inline@3"
+        },
+        {
+          "command": "gdbLiveWatch.addExpressionToGroup",
+          "when": "view == gdbLiveWatch && viewItem == gdbLiveWatch.group",
+          "group": "1_modify@1"
+        },
+        {
+          "command": "gdbLiveWatch.renameGroup",
+          "when": "view == gdbLiveWatch && viewItem == gdbLiveWatch.group",
+          "group": "1_modify@2"
+        },
+        {
+          "command": "gdbLiveWatch.removeGroup",
+          "when": "view == gdbLiveWatch && viewItem == gdbLiveWatch.group",
+          "group": "1_modify@3"
+        },
         {
           "command": "gdbLiveWatch.editExpression",
           "when": "view == gdbLiveWatch && viewItem == gdbLiveWatch.expression",
@@ -258,6 +447,26 @@
           "group": "1_modify@2"
         },
         {
+          "command": "gdbLiveWatch.moveToGroup",
+          "when": "view == gdbLiveWatch && viewItem == gdbLiveWatch.expression",
+          "group": "1_modify@3"
+        },
+        {
+          "command": "gdbLiveWatch.setFormat",
+          "when": "view == gdbLiveWatch && viewItem == gdbLiveWatch.expression",
+          "group": "3_format@1"
+        },
+        {
+          "command": "gdbLiveWatch.setScaleUnit",
+          "when": "view == gdbLiveWatch && viewItem == gdbLiveWatch.expression",
+          "group": "3_format@2"
+        },
+        {
+          "command": "gdbLiveWatch.clearFormat",
+          "when": "view == gdbLiveWatch && viewItem == gdbLiveWatch.expression",
+          "group": "3_format@3"
+        },
+        {
           "command": "gdbLiveWatch.copyValue",
           "when": "view == gdbLiveWatch",
           "group": "2_copy@1"
@@ -266,6 +475,11 @@
           "command": "gdbLiveWatch.copyExpression",
           "when": "view == gdbLiveWatch",
           "group": "2_copy@2"
+        },
+        {
+          "command": "gdbLiveWatch.copyValueWithTimestamp",
+          "when": "view == gdbLiveWatch && viewItem =~ /gdbLiveWatch\\.(expression|variable)/",
+          "group": "2_copy@3"
         },
         {
           "command": "gdbDaq.addFromWatch",
@@ -283,9 +497,14 @@
           "group": "inline@1"
         },
         {
-          "command": "gdbSymbols.goTo",
-          "when": "view == gdbSymbols && viewItem == gdbSymbols.symbolWithLocation",
+          "command": "gdbSymbols.toggleFavorite",
+          "when": "view == gdbSymbols && viewItem =~ /gdbSymbols\\.symbol/",
           "group": "inline@2"
+        },
+        {
+          "command": "gdbSymbols.goTo",
+          "when": "view == gdbSymbols && viewItem =~ /gdbSymbols\\.symbol.*loc/",
+          "group": "inline@3"
         },
         {
           "command": "gdbSymbols.addToLiveWatch",
@@ -294,8 +513,13 @@
         },
         {
           "command": "gdbSymbols.goTo",
-          "when": "view == gdbSymbols && viewItem == gdbSymbols.symbolWithLocation",
+          "when": "view == gdbSymbols && viewItem =~ /gdbSymbols\\.symbol.*loc/",
           "group": "1_actions@2"
+        },
+        {
+          "command": "gdbSymbols.toggleFavorite",
+          "when": "view == gdbSymbols && viewItem =~ /gdbSymbols\\.symbol/",
+          "group": "1_actions@4"
         },
         {
           "command": "gdbSymbols.copyName",
@@ -332,6 +556,38 @@
           "when": "false"
         },
         {
+          "command": "gdbLiveWatch.addExpressionToGroup",
+          "when": "false"
+        },
+        {
+          "command": "gdbLiveWatch.renameGroup",
+          "when": "false"
+        },
+        {
+          "command": "gdbLiveWatch.removeGroup",
+          "when": "false"
+        },
+        {
+          "command": "gdbLiveWatch.moveToGroup",
+          "when": "false"
+        },
+        {
+          "command": "gdbLiveWatch.setFormat",
+          "when": "false"
+        },
+        {
+          "command": "gdbLiveWatch.setScaleUnit",
+          "when": "false"
+        },
+        {
+          "command": "gdbLiveWatch.clearFormat",
+          "when": "false"
+        },
+        {
+          "command": "gdbLiveWatch.copyValueWithTimestamp",
+          "when": "false"
+        },
+        {
           "command": "gdbSymbols.addToLiveWatch",
           "when": "false"
         },
@@ -341,6 +597,10 @@
         },
         {
           "command": "gdbSymbols.copyName",
+          "when": "false"
+        },
+        {
+          "command": "gdbSymbols.toggleFavorite",
           "when": "false"
         },
         {
@@ -356,6 +616,45 @@
     "configuration": {
       "title": "GDB Live Watch",
       "properties": {
+        "gdbLiveWatch.autoAttach.processName": {
+          "type": "string",
+          "default": "VeosVpuHost.exe",
+          "description": "Image name of the target process for the 'Attach GDB to Running Process' command (trailing '.exe' optional). The most recently started matching process is attached automatically. When empty, the name is derived from 'gdbLiveWatch.autoAttach.program'."
+        },
+        "gdbLiveWatch.autoAttach.miDebuggerPath": {
+          "type": "string",
+          "default": "C:/winIDEA/gdb_multiarch/gdb.exe",
+          "description": "Path to the GDB executable used for one-click attach (cppdbg 'miDebuggerPath'). Set the absolute path to your GDB. Leave empty to use the GDB bundled with the C/C++ extension."
+        },
+        "gdbLiveWatch.autoAttach.program": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to the target executable passed to GDB on attach. When empty, it is resolved automatically from the running process."
+        },
+        "gdbLiveWatch.autoAttach.setupCommands": {
+          "type": "array",
+          "default": [
+            {
+              "description": "Enable pretty-printing for gdb",
+              "text": "-enable-pretty-printing",
+              "ignoreFailures": true
+            }
+          ],
+          "description": "GDB setup commands sent on attach (cppdbg 'setupCommands'), used when the config is built from settings (no launch.json).",
+          "items": {
+            "type": "object",
+            "properties": {
+              "text": { "type": "string" },
+              "description": { "type": "string" },
+              "ignoreFailures": { "type": "boolean" }
+            }
+          }
+        },
+        "gdbLiveWatch.autoAttach.configName": {
+          "type": "string",
+          "default": "",
+          "description": "Optional: name of a launch.json attach configuration to reuse instead of building one from the settings above. When empty, no launch.json is needed — the cppdbg attach config is created directly from these settings."
+        },
         "gdbLiveWatch.pollingInterval": {
           "type": "number",
           "default": 1000,
@@ -367,20 +666,27 @@
           "enum": [
             "auto",
             "nonStop",
-            "sample"
+            "sample",
+            "stoppedOnly"
           ],
           "enumDescriptions": [
             "Try direct evaluation while running (non-stop mode); automatically fall back to pause/read/continue sampling if the target/adapter does not support it.",
             "Only evaluate directly while the target is running. Requires GDB non-stop mode.",
-            "Always use pause/read/continue sampling cycles while the target is running. Use this when non-stop mode is not supported."
+            "Always use pause/read/continue sampling cycles while the target is running. Use this when non-stop mode is not supported.",
+            "Never pause a running target. Values only update while the target is stopped (breakpoint/step). Use this for unattended runs on native-Windows GDB where the pause/break-in race can crash the cppdbg debug engine."
           ],
           "default": "auto",
-          "description": "How variables are read while the target is running."
+          "description": "How variables are read while the target is running. Use 'stoppedOnly' to guarantee the extension never interrupts the running target."
         },
         "gdbLiveWatch.autoStartPolling": {
           "type": "boolean",
           "default": true,
           "description": "Automatically start live polling when a debug session starts."
+        },
+        "gdbLiveWatch.adaptivePolling": {
+          "type": "boolean",
+          "default": true,
+          "description": "When sampling (pause/read/continue) is in use, automatically stretch the polling interval so the target is paused for at most ~20% of the time, avoiding choking timing-sensitive models."
         },
         "gdbLiveWatch.maxChildren": {
           "type": "number",
@@ -391,12 +697,12 @@
         "gdbLiveWatch.hexFormat": {
           "type": "boolean",
           "default": false,
-          "description": "Display values in hexadecimal format."
+          "description": "Display values in hexadecimal format (default for expressions without a per-expression format)."
         },
         "gdbSymbols.autoLoad": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically load the symbol table when a debug session starts. The table is cached for the whole session; filtering never triggers a reload."
+          "description": "Automatically load the full symbol table when a debug session starts. The table is cached for the session; pressing Enter in the symbol filter can run a narrower GDB query for that name filter."
         },
         "gdbSymbols.maxSymbolsPerCategory": {
           "type": "number",
@@ -407,7 +713,40 @@
         "gdbSymbols.includeNonDebugging": {
           "type": "boolean",
           "default": false,
-          "description": "Also list symbols without debug information ('Non-debugging symbols' from the symbol file, e.g. stripped DLL exports)."
+          "description": "Also list symbols without debug information ('Non-debugging symbols' from the symbol file, e.g. stripped DLL exports). Disabling this also makes symbol loading faster, since that (often very large) section is skipped entirely."
+        },
+        "gdbSymbols.sourcePathFilter": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Only keep symbols whose source file path matches one of these patterns (case-insensitive substring, or a regular expression). Applied while parsing GDB's response, so excluded files are never held in memory or written to the symbol cache; changing this re-parses the already-fetched listing instead of re-running the GDB query. Note that GDB's `info variables`/`info functions` have no file-scoping option of their own, so the query itself always enumerates the whole symbol table regardless of this setting - only a name filter (the Symbols view's filter box) can reduce that. Leave empty to show symbols from all source files. Example: `[\"Z:\\\\Code\", \"MB_ZC_Rear_vECU\"]` keeps only application/model symbols and hides compiler/runtime files (mingw, gcc, msys). Non-debugging symbols (which have no source file) are excluded while a filter is active."
+        },
+        "gdbSymbols.sourcePathExclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Hide symbols whose source file path matches one of these patterns (case-insensitive substring, or a regular expression), applied after `#gdbSymbols.sourcePathFilter#` while parsing GDB's response (excluded files are never held in memory or written to the symbol cache). Changing this re-parses the already-fetched listing instead of re-running the GDB query. Example: `[\"mingw\", \"gcc\", \"msys\", \"buildroot\"]` drops compiler/runtime files. Leave empty to exclude nothing."
+        },
+        "gdbSymbols.scopeToDspaceModel": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically scope the Symbols view to the loaded dSPACE model (the .dll/.vap under the dSPACE toolchain tree that carries the release-specific symbols), like pointing winIDEA at a single symbol file. Applied while parsing GDB's response, same as `#gdbSymbols.sourcePathFilter#`. Source files under the dSPACE tree or matching the detected model name are kept; volatile system/runtime files are hidden. Ignored when `#gdbSymbols.sourcePathFilter#` is set (your explicit filter takes over), and automatically skipped if it would hide every symbol."
+        },
+        "gdbSymbols.settlePollMs": {
+          "type": "number",
+          "default": 50,
+          "minimum": 10,
+          "description": "Interval (ms) at which the symbol loader polls for streamed GDB output while waiting for an 'info' listing to finish. Lower values finish sooner but poll more often."
+        },
+        "gdbSymbols.settleMaxMs": {
+          "type": "number",
+          "default": 3000,
+          "minimum": 100,
+          "description": "Maximum time (ms) to wait for a single GDB symbol listing to stop streaming before using whatever was captured."
         },
         "gdbSymbols.fileScopedExpressions": {
           "type": "boolean",
@@ -419,6 +758,18 @@
           "default": 100000,
           "minimum": 1000,
           "description": "Maximum number of acquired samples kept in the DAQ buffer per variable. Once full, the oldest samples are discarded (ring buffer)."
+        },
+        "gdbDaq.lineWidth": {
+          "type": "number",
+          "default": 1.25,
+          "minimum": 0.5,
+          "maximum": 6,
+          "description": "Line width (in pixels) used to draw the DAQ chart traces."
+        },
+        "gdbDaq.showMarkers": {
+          "type": "boolean",
+          "default": true,
+          "description": "Draw a dot at each acquired sample on the DAQ chart when the data is sparse enough."
         }
       }
     }
