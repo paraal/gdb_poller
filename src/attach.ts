@@ -46,6 +46,71 @@ async function findLatestProcess(processName: string): Promise<ProcInfo | undefi
 }
 
 /**
+ * GDB commands that make symbol loading fast across sessions, prepended to the
+ * attach `setupCommands` (see `withFastSymbolLoad`). The key one is the GDB
+ * *index cache*: by default GDB re-scans the entire DWARF debug info of every
+ * binary on every attach, which for a large model DLL takes tens of seconds.
+ * With the index cache enabled, that scan happens once per binary and the
+ * resulting index is persisted on disk keyed by the binary's build id — every
+ * later attach to the same release maps it back in and symbol loading drops to
+ * seconds. This is the same trick winIDEA uses (its own persistent symbol
+ * database) expressed in GDB terms.
+ *
+ * All commands carry `ignoreFailures` since their availability depends on the
+ * GDB version ('set index-cache enabled' is GDB >= 12, 'set index-cache on'
+ * is the GDB 8.3-11 spelling, debuginfod exists from GDB 10.1, worker-threads
+ * from GDB 9).
+ */
+const FAST_SYMBOL_LOAD_COMMANDS = [
+    {
+        description: 'Persist the symbol index across sessions (GDB >= 12)',
+        text: 'set index-cache enabled on',
+        ignoreFailures: true
+    },
+    {
+        description: 'Persist the symbol index across sessions (GDB 8.3-11)',
+        text: 'set index-cache on',
+        ignoreFailures: true
+    },
+    {
+        description: 'Never stall symbol loading on debuginfod server lookups',
+        text: 'set debuginfod enabled off',
+        ignoreFailures: true
+    },
+    {
+        description: 'Index debug info with all available cores',
+        text: 'maintenance set worker-threads unlimited',
+        ignoreFailures: true
+    }
+];
+
+/**
+ * Prepends the fast-symbol-load GDB commands to the user's setup commands,
+ * unless disabled via `gdbLiveWatch.autoAttach.fastSymbolLoad` or the user
+ * already manages the index cache themselves. Prepending (not appending)
+ * ensures the cache is enabled before any command that could trigger symbol
+ * reading.
+ */
+function withFastSymbolLoad(setupCommands: object[]): object[] {
+    const enabled = vscode.workspace
+        .getConfiguration('gdbLiveWatch')
+        .get<boolean>('autoAttach.fastSymbolLoad', true);
+    if (!enabled) {
+        return setupCommands;
+    }
+    // Only an actual cache-configuration command ("set index-cache ...")
+    // counts as the user managing the cache; diagnostic commands such as
+    // "set debug index-cache on" must not suppress the fast-load commands.
+    const userManagesCache = setupCommands.some((c) =>
+        /^\s*set\s+index-cache\b/.test(String((c as { text?: unknown })?.text ?? ''))
+    );
+    if (userManagesCache) {
+        return setupCommands;
+    }
+    return [...FAST_SYMBOL_LOAD_COMMANDS, ...setupCommands];
+}
+
+/**
  * One-click auto-attach: locates the configured target process, resolves its
  * executable, and starts a `cppdbg` GDB attach session — no process picker, no
  * manual launch config. The Live Watch / Symbols / DAQ panels then light up
@@ -117,6 +182,9 @@ export async function attachToConfiguredProcess(): Promise<void> {
                 if (programOverride) {
                     config.program = programOverride;
                 }
+                config.setupCommands = withFastSymbolLoad(
+                    Array.isArray(config.setupCommands) ? config.setupCommands : []
+                );
             } else {
                 // Build the attach config entirely from settings — no launch.json.
                 const program = programOverride || proc.executablePath;
@@ -134,7 +202,7 @@ export async function attachToConfiguredProcess(): Promise<void> {
                     program,
                     processId: proc.processId,
                     MIMode: 'gdb',
-                    setupCommands
+                    setupCommands: withFastSymbolLoad(setupCommands)
                 };
             }
             if (miDebuggerPath) {

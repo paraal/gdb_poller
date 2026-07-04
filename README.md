@@ -36,10 +36,46 @@ Optionally, set `gdbLiveWatch.autoAttach.configName` to reuse a named attach con
 | `gdbLiveWatch.autoAttach.program` | `""` | Optional executable path. Empty = resolved from the running process. |
 | `gdbLiveWatch.autoAttach.setupCommands` | enable pretty-printing | GDB `setupCommands` sent on attach. |
 | `gdbLiveWatch.autoAttach.configName` | `""` | Optional name of a `launch.json` attach config to reuse instead of the settings. |
+| `gdbLiveWatch.autoAttach.fastSymbolLoad` | `true` | Prepend GDB index-cache commands to the setup commands so symbol loading is fast on every re-attach (see below). |
 
 > Windows-only (uses a CIM/PowerShell query to locate the process). Requires the C/C++ extension (`cppdbg`) and a working GDB.
 
+## Fast symbol loading (winIDEA-style)
 
+Attaching to a big release used to spend most of its time in GDB itself: by default GDB re-scans the **entire DWARF debug info** of the executable and every symbol-bearing DLL on **every** attach. winIDEA avoids this by keeping its own persistent symbol database — GDB has the same mechanism, the **index cache**, it is just off by default.
+
+With `gdbLiveWatch.autoAttach.fastSymbolLoad` (default on), one-click attach automatically prepends these commands to the `setupCommands`:
+
+```json
+{ "text": "set index-cache enabled on", "ignoreFailures": true },
+{ "text": "set index-cache on", "ignoreFailures": true },
+{ "text": "set debuginfod enabled off", "ignoreFailures": true },
+{ "text": "maintenance set worker-threads unlimited", "ignoreFailures": true }
+```
+
+- **First attach to a release**: GDB builds the symbol index once (multi-core) and persists it on disk, keyed by the binary's identity.
+- **Every later attach to the same release**: the index is mapped back in from disk instead of being rebuilt — symbol loading drops from tens of seconds to a few seconds, per release. Switching between releases stays fast too, since each release keeps its own cache entry.
+
+If you debug through your own `launch.json` (not one-click attach), add the same commands to that configuration's `setupCommands` yourself.
+
+> **Limitation:** GDB's index cache keys entries by the binary's **build-id**, and MinGW-linked Windows binaries (which dSPACE model DLLs typically are) carry none by default — GDB then silently never stores an index (`show index-cache stats` keeps reporting only misses, and the cache directory is never created). In that case use the command below instead.
+
+### Optimize Release for Fast Symbol Loading (works without build-id)
+
+The **GDB Symbols: Optimize Release for Fast Symbol Loading** command (also in the Symbols view's `…` menu) embeds the symbol index **directly into the binaries** (a `.gdb_index` section, like GNU `gdb-add-index`), which works regardless of build-ids:
+
+1. Stop the debug session **and the target process** (the files must not be in use).
+2. Run the command. With a recently active session it picks up the host executable and the dSPACE model modules automatically; otherwise it asks you to select the binaries.
+3. It runs GDB's one-time DWARF scan per binary (`save gdb-index`), then embeds the result with `objcopy` (found next to the configured GDB, or in PATH).
+
+From then on, **every** attach to that release — first ones included, on any machine — skips the DWARF scan entirely. This is the closest equivalent to winIDEA's persistent symbol database. Re-run the command once per new release (already-indexed binaries are detected and skipped).
+
+Two more caches keep the extension's **Symbols view** itself fast:
+
+- The raw `info variables` / `info functions` listings are cached on disk per release (keyed by content hashes of the host executable and the symbol-bearing DLLs), so reopening a session on a known release skips the multi-second GDB query entirely. Re-attach sessions wait a few seconds for the module list so the right release is fingerprinted before caching.
+- Those content hashes are computed once per binary and reused while the file is unchanged, so signature checks no longer re-read multi-hundred-MB DLLs on every load.
+
+> Tip for the biggest binaries: you can also bake the index straight into a binary once with GDB's `gdb-add-index <file>` utility — then even the first load is fast, on any machine.
 
 ## Usage
 

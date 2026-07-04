@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import * as crypto from 'crypto';
 import { DebugSessionTracker } from './tracker';
 import { Poller } from './poller';
 
@@ -87,11 +86,10 @@ export function looksLikeListing(text: string): boolean {
 export function parseSymbolListing(
     output: string,
     kind: ListingKind,
-    options?: { skipNonDebugging?: boolean; fileFilter?: (file: string) => boolean }
+    options?: { skipNonDebugging?: boolean }
 ): SymbolEntry[] {
     const entries: SymbolEntry[] = [];
     let currentFile: string | undefined;
-    let currentFileIncluded = true;
     let nonDebugging = false;
 
     for (const raw of output.split(/\r?\n/)) {
@@ -105,10 +103,6 @@ export function parseSymbolListing(
         const fileMatch = line.match(/^File (.+):$/);
         if (fileMatch) {
             currentFile = fileMatch[1];
-            // Decide once per source file whether its symbols are kept, so the
-            // (often huge) body of an excluded file is skipped cheaply line by
-            // line instead of building entries we would discard later.
-            currentFileIncluded = options?.fileFilter ? options.fileFilter(currentFile) : true;
             nonDebugging = false;
             continue;
         }
@@ -116,8 +110,7 @@ export function parseSymbolListing(
             // This section is always last in the listing. When the user does not
             // want non-debugging symbols, stop parsing here entirely instead of
             // scanning (and later discarding) potentially thousands of lines.
-            // A source-path filter also excludes these (they have no file).
-            if (options?.skipNonDebugging || options?.fileFilter) {
+            if (options?.skipNonDebugging) {
                 break;
             }
             nonDebugging = true;
@@ -135,11 +128,6 @@ export function parseSymbolListing(
                     nonDebugging: true
                 });
             }
-            continue;
-        }
-
-        // Skip the entire body of a source file that the path filter excluded.
-        if (!currentFileIncluded) {
             continue;
         }
 
@@ -287,118 +275,18 @@ function makeGdbNameRegexp(filter: string): string | undefined {
 }
 
 /**
- * Builds a matcher for the user's source-path filter (`gdbSymbols.sourcePathFilter`).
- * A symbol's source file passes when it matches any configured pattern; each
- * pattern is tried as a regular expression and, if that fails to compile, as a
- * case-insensitive substring. Path separators are normalised so a pattern using
- * "/" also matches Windows "\\" paths (and vice versa). Returns undefined when no
- * (non-empty) pattern is configured, meaning "no filtering".
- */
-function makeSourcePathFilter(
-    patterns: string[] | undefined
-): ((file: string) => boolean) | undefined {
-    const terms = (patterns ?? []).map((p) => p.trim()).filter((p) => p.length > 0);
-    if (terms.length === 0) {
-        return undefined;
-    }
-    const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase();
-    const matchers = terms.map((term) => {
-        const normTerm = term.replace(/\\\\/g, '/').replace(/\\/g, '/');
-        try {
-            const re = new RegExp(normTerm, 'i');
-            return (file: string) => re.test(norm(file));
-        } catch {
-            const needle = norm(normTerm);
-            return (file: string) => norm(file).includes(needle);
-        }
-    });
-    return (file) => matchers.some((m) => m(file));
-}
-
-/**
- * Combines the include (`sourcePathFilter`) and exclude (`sourcePathExclude`)
- * path patterns into a single per-file predicate: a source file is kept when it
- * matches an include pattern (or no include patterns are set) *and* matches no
- * exclude pattern. Returns undefined when neither list has any pattern, meaning
- * "no filtering".
- */
-function makeSourceFileMatcher(
-    include: string[] | undefined,
-    exclude: string[] | undefined
-): ((file: string) => boolean) | undefined {
-    const inc = makeSourcePathFilter(include);
-    const exc = makeSourcePathFilter(exclude);
-    if (!inc && !exc) {
-        return undefined;
-    }
-    return (file) => (!inc || inc(file)) && !(exc && exc(file));
-}
-
-/**
- * Builds the implicit "scope to the dSPACE model" predicate used when the user
- * has not configured an explicit include filter. A source file is considered
- * part of the model when it lives under a dSPACE toolchain tree, or when its
- * path contains the detected model name (e.g. "MB_ZC_Rear_vECU") — the same
- * module winIDEA would point its single symbol file at. Returns undefined when
- * there is nothing to scope by (no model name and, therefore, only the generic
- * dSPACE-tree heuristic, which is still returned as it is always meaningful).
- */
-function makeModelScopeMatcher(modelName: string | undefined): (file: string) => boolean {
-    const name = modelName?.trim().toLowerCase();
-    return (file) => isDspacePath(file) || (!!name && file.toLowerCase().includes(name));
-}
-
-/**
- * Scans a raw `info variables`/`info functions` listing for the distinct
- * source files it mentions ("File X:" section headers), without parsing any
- * declarations. Used to cheaply check whether the dSPACE-model scope would
- * hide every symbol before committing to it at parse time.
- */
-function collectListingFiles(text: string): string[] {
-    const files: string[] = [];
-    for (const raw of text.split(/\r?\n/)) {
-        const m = raw.match(/^File (.+):$/);
-        if (m) {
-            files.push(m[1]);
-        }
-    }
-    return files;
-}
-
-/**
  * Loads the target's symbol table (variables, functions, constants, types)
  * through GDB console commands, similar to winIDEA's Symbol Browser.
  *
- * The raw GDB listings are fetched once per debug session and cached (in
- * memory and on disk) independent of any filter. The source-path include/
- * exclude settings and the automatic dSPACE-model scope are applied while
- * parsing those listings into `allEntries` (see `computeEffectiveFileFilter`),
- * so excluded files never end up held in memory or written to the symbol
- * cache; changing them re-parses the cached raw text (`reapplySourceFilters`)
- * instead of re-querying GDB. Name filters can also run a narrower GDB regexp
- * query through {@link loadFiltered}.
+ * The raw GDB listings are fetched fresh from GDB on every load. Name filters
+ * can also run a narrower GDB regexp query through {@link loadFiltered}.
  */
 const FAVORITES_KEY = 'gdbSymbols.favorites';
 const FILTER_HISTORY_KEY = 'gdbSymbols.filterHistory';
 const MAX_FILTER_HISTORY = 20;
 
-/** Bumped whenever the on-disk cache format or the parser output changes. */
-const SYMBOL_CACHE_VERSION = 5;
-
-/** Persisted shape of a cached symbol table on disk: GDB's raw listing text. */
-interface SymbolCacheFile {
-    version: number;
-    /** Identity of the binary the listings were fetched from. */
-    signature: string;
-    /** Raw `info variables` listing text, as returned by GDB. */
-    vars: string;
-    /** Raw `info functions` listing text, as returned by GDB. */
-    funcs: string;
-}
-
 export interface SymbolLoadTiming {
     durationMs: number;
-    fromCache: boolean;
     entries: number;
     /** Present when the last GDB query loaded only names matching this filter. */
     filter?: string;
@@ -415,28 +303,13 @@ interface FilteredSymbolSet {
 
 export class SymbolService implements vscode.Disposable {
     /**
-     * Symbol table as parsed from GDB (sorted by name), already scoped by the
-     * source-path filter / dSPACE model scope (see `computeEffectiveFileFilter`).
+     * Symbol table as parsed from GDB (sorted by name).
      */
     private allEntries: SymbolEntry[] = [];
     /** Candidate set loaded through `info variables/functions REGEXP` for the active filter. */
     private filteredEntries?: FilteredSymbolSet;
-    /**
-     * Raw `info variables` / `info functions` listing text from the last GDB
-     * query (or disk-cache read), kept so the source-path filter / dSPACE model
-     * scope can be re-applied by re-parsing instead of re-querying GDB.
-     */
-    private rawListings?: { sessionId: string; vars: string; funcs: string };
-    /** Session the cached table belongs to. */
+    /** Session the loaded table belongs to. */
     private loadedSessionId?: string;
-    /** Identity of the binary the in-memory table was parsed from. */
-    private loadedSignature?: string;
-    /**
-     * Name of the loaded dSPACE model (e.g. "MB_ZC_Rear_vECU"), when one was
-     * detected for the current session. Used to auto-scope the view to that
-     * model's symbols (see `gdbSymbols.scopeToDspaceModel`).
-     */
-    private modelName?: string;
     /** Visible (filtered, capped) view, per category. */
     private readonly entries = new Map<SymbolCategory, SymbolEntry[]>();
     private readonly truncatedCategories = new Set<SymbolCategory>();
@@ -452,9 +325,8 @@ export class SymbolService implements vscode.Disposable {
     loading = false;
 
     /**
-     * Timing of the most recent symbol load that actually did work (GDB query or
-     * disk-cache read), for performance comparison. `fromCache` distinguishes a
-     * disk-cache hit from a full GDB round-trip. Undefined until the first load.
+     * Timing of the most recent symbol load (GDB query), for performance
+     * comparison. Undefined until the first load.
      */
     private _lastLoad?: SymbolLoadTiming;
 
@@ -481,8 +353,7 @@ export class SymbolService implements vscode.Disposable {
     constructor(
         private readonly tracker: DebugSessionTracker,
         private readonly poller: Poller,
-        private readonly state: vscode.Memento,
-        private readonly cacheDir?: vscode.Uri
+        private readonly state: vscode.Memento
     ) {
         this.favorites = new Set(state.get<string[]>(FAVORITES_KEY, []));
     }
@@ -527,7 +398,7 @@ export class SymbolService implements vscode.Disposable {
         void this.state.update(FILTER_HISTORY_KEY, history.slice(0, MAX_FILTER_HISTORY));
     }
 
-    /** Local filter (regex or substring) applied to the cached table - instant. */
+    /** Local filter (regex or substring) applied to the loaded table - instant. */
     get filter(): string {
         return this._filter;
     }
@@ -644,10 +515,7 @@ export class SymbolService implements vscode.Disposable {
     clear(): void {
         this.allEntries = [];
         this.filteredEntries = undefined;
-        this.rawListings = undefined;
         this.loadedSessionId = undefined;
-        this.loadedSignature = undefined;
-        this.modelName = undefined;
         this.entries.clear();
         this.truncatedCategories.clear();
         this.changeEmitter.fire();
@@ -658,23 +526,15 @@ export class SymbolService implements vscode.Disposable {
         if (this.filteredEntries?.sessionId === sessionId) {
             this.filteredEntries = undefined;
         }
-        if (this.rawListings?.sessionId === sessionId) {
-            this.rawListings = undefined;
-        }
         if (this.loadedSessionId === sessionId) {
             this.loadedSessionId = undefined;
-            this.loadedSignature = undefined;
-            this.modelName = undefined;
         }
     }
 
     /**
-     * Loads the complete symbol table. Skipped when the table is already cached
-     * in memory for this session, unless `force` is set (explicit reload).
-     *
-     * On a cold load it first tries an on-disk cache keyed by the target binary's
-     * identity (path + content hash + settings); a hit avoids talking to GDB
-     * entirely. On a miss it queries GDB and writes the result back to disk.
+     * Loads the complete symbol table by querying GDB. The listing is always
+     * fetched fresh from GDB, so every release (and every reload) reflects the
+     * current target's symbols and line numbers.
      */
     async load(session: vscode.DebugSession, options?: { force?: boolean }): Promise<void> {
         if (this.loading) {
@@ -686,85 +546,37 @@ export class SymbolService implements vscode.Disposable {
         try {
             const cfg = vscode.workspace.getConfiguration('gdbSymbols');
             const includeNonDebugging = cfg.get<boolean>('includeNonDebugging', false);
-            const signature = await this.binarySignature(session, includeNonDebugging);
-
-            // Detect the dSPACE model backing this session so the view can be
-            // auto-scoped to it (winIDEA-style single-file focus). Best-effort:
-            // adapters without a 'modules' request simply leave it undefined.
-            this.modelName = await this.getDspaceModelName(session).catch(() => undefined);
-
-            // In-memory fast path: reuse the cached table only when it belongs to
-            // this session *and* was parsed from the same binary. Comparing the
-            // signature ensures a different release (a rebuilt or swapped binary,
-            // even at the same path) is reloaded instead of being masked by the
-            // previously cached symbols.
-            if (
-                !options?.force &&
-                this.isLoadedFor(session.id) &&
-                this.allEntries.length > 0 &&
-                this.loadedSignature === signature
-            ) {
-                this.filteredEntries = undefined;
-                this.rebuildView();
-                this.changeEmitter.fire();
-                return;
-            }
 
             started = true;
             this.changeEmitter.fire();
 
             const skipNonDebugging = !includeNonDebugging;
 
-            // Disk fast path: reuse the previously fetched raw listings for the
-            // same binary. The cache stores GDB's raw text rather than parsed and
-            // filtered entries, so a different source-path filter or dSPACE-scope
-            // setting never invalidates it - only re-parsing (cheap) is needed.
-            let listing = !options?.force && signature ? await this.readDiskCache(signature) : undefined;
-            const fromCache = !!listing;
+            const [vars, funcs] = await this.poller.runReadOperation(session, async () => {
+                // Ask GDB to omit non-debugging (minimal) symbols with '-n' when
+                // the user does not want them. On a host process that loads many
+                // system DLLs those minimal symbols dominate the listing;
+                // dropping them at the source (rather than client-side after
+                // parsing) means GDB emits far less text and the DAP round-trip
+                // is correspondingly faster.
+                const v = await this.execInfoListing(session, 'info variables', skipNonDebugging);
+                const f = await this.execInfoListing(session, 'info functions', skipNonDebugging);
+                return [v, f];
+            });
+            const listing = { vars, funcs };
 
-            if (!listing) {
-                const [vars, funcs] = await this.poller.runReadOperation(session, async () => {
-                    // Ask GDB to omit non-debugging (minimal) symbols with '-n' when
-                    // the user does not want them. On a host process that loads many
-                    // system DLLs those minimal symbols dominate the listing;
-                    // dropping them at the source (rather than client-side after
-                    // parsing) means GDB emits far less text and the DAP round-trip
-                    // is correspondingly faster.
-                    const v = await this.execInfoListing(session, 'info variables', skipNonDebugging);
-                    const f = await this.execInfoListing(session, 'info functions', skipNonDebugging);
-                    return [v, f];
-                });
-                listing = { vars, funcs };
-            }
-
-            this.rawListings = { sessionId: session.id, vars: listing.vars, funcs: listing.funcs };
-
-            // Apply the source-path filter / dSPACE model scope while parsing, so
-            // an excluded file's (often huge) body is skipped cheaply line by line
-            // instead of building entries for it that would only be discarded
-            // later. This is what keeps `allEntries` - and therefore sorting, the
-            // in-memory/disk cache and every view rebuild - scoped to what the user
-            // asked for, without paying for another GDB query when the filter
-            // changes (see `reapplySourceFilters`).
-            const fileFilter = this.computeEffectiveFileFilter(listing.vars, listing.funcs);
             this.allEntries = [
-                ...parseSymbolListing(listing.vars, 'variables', { skipNonDebugging, fileFilter }),
-                ...parseSymbolListing(listing.funcs, 'functions', { skipNonDebugging, fileFilter })
+                ...parseSymbolListing(listing.vars, 'variables', { skipNonDebugging }),
+                ...parseSymbolListing(listing.funcs, 'functions', { skipNonDebugging })
             ].sort((a, b) => a.name.localeCompare(b.name));
             this.filteredEntries = undefined;
             this.loadedSessionId = session.id;
-            this.loadedSignature = signature;
             this.rebuildView();
 
             this._lastLoad = {
                 durationMs: Date.now() - loadStart,
-                fromCache,
                 entries: this.allEntries.length
             };
-
-            if (signature && !fromCache) {
-                void this.writeDiskCache(signature, listing.vars, listing.funcs);
-            }
         } finally {
             this.loading = false;
             if (started) {
@@ -776,9 +588,9 @@ export class SymbolService implements vscode.Disposable {
     /**
      * Loads only symbols whose names match the filter by using GDB's
      * `info variables/functions REGEXP` form. This is intentionally separate
-     * from the full-table cache: a filtered query can be much cheaper for a
+     * from the full-table load: a filtered query can be much cheaper for a
      * selective name, while clearing the filter returns to the complete table
-     * if it has already been loaded.
+     * by re-querying GDB.
      */
     async loadFiltered(
         session: vscode.DebugSession,
@@ -811,8 +623,6 @@ export class SymbolService implements vscode.Disposable {
             const includeNonDebugging = cfg.get<boolean>('includeNonDebugging', false);
             const skipNonDebugging = !includeNonDebugging;
 
-            this.modelName = await this.getDspaceModelName(session).catch(() => undefined);
-
             started = true;
             this.changeEmitter.fire();
 
@@ -832,10 +642,9 @@ export class SymbolService implements vscode.Disposable {
                 return [v, f];
             });
 
-            const fileFilter = this.computeEffectiveFileFilter(vars, funcs);
             const entries = [
-                ...parseSymbolListing(vars, 'variables', { skipNonDebugging, fileFilter }),
-                ...parseSymbolListing(funcs, 'functions', { skipNonDebugging, fileFilter })
+                ...parseSymbolListing(vars, 'variables', { skipNonDebugging }),
+                ...parseSymbolListing(funcs, 'functions', { skipNonDebugging })
             ].sort((a, b) => a.name.localeCompare(b.name));
 
             this._filter = term;
@@ -848,7 +657,6 @@ export class SymbolService implements vscode.Disposable {
             this.rebuildView();
             this._lastLoad = {
                 durationMs: Date.now() - loadStart,
-                fromCache: false,
                 entries: entries.length,
                 filter: term,
                 gdbRegexp
@@ -861,271 +669,10 @@ export class SymbolService implements vscode.Disposable {
         }
     }
 
-    // ---- on-disk symbol cache ----------------------------------------------
+    // ---- view rebuilding ---------------------------------------------------
 
-    /**
-     * Builds a stable identity string for the binary being debugged, combining
-     * its path, a hash of its contents, the identity of the loaded modules and
-     * the settings that affect parsing. The content hash (not size/mtime) is
-     * what distinguishes two releases, so a rebuilt or swapped binary is always
-     * re-parsed. Returns undefined when no binary path is known (then caching is
-     * disabled).
-     *
-     * The main `program` alone is not enough when attaching: in an attach setup
-     * the `program` is often a generic *host* process (e.g. VeosVpuHost.exe) that
-     * stays byte-for-byte identical across releases, while the release-specific
-     * symbols live in a DLL/shared object loaded by that host. Hashing only the
-     * host executable therefore made every release collide on the same signature
-     * and reuse the first release's cached symbols. Folding in the loaded modules
-     * (the DLLs that actually carry the debug symbols) makes each release map to
-     * its own cache entry.
-     */
-    private async binarySignature(
-        session: vscode.DebugSession,
-        includeNonDebugging: boolean
-    ): Promise<string | undefined> {
-        if (!this.cacheDir) {
-            return undefined;
-        }
-        const cfg = session.configuration as {
-            program?: string;
-            executable?: string;
-            request?: string;
-        };
-        const binPath = cfg.program ?? cfg.executable;
-        if (!binPath) {
-            return undefined;
-        }
-        try {
-            // Hash the actual binary contents rather than trusting size + mtime.
-            // Two different releases can share the same size (firmware images are
-            // often padded to a fixed flash layout) and the same mtime (preserved
-            // on copy/extract, or coarse filesystem granularity), which made a new
-            // release silently reuse the previous release's cached symbols. A
-            // content hash is the only reliable way to tell two binaries apart.
-            const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(binPath));
-            const contentHash = crypto.createHash('sha1').update(bytes).digest('hex');
-            const modulesHash = await this.modulesSignature(session, binPath);
-
-            // Attach without an identifiable symbol-bearing module: the attach
-            // `program` is typically a generic *host* process (e.g. a VPU/host
-            // runner) that stays byte-for-byte identical across releases, while
-            // the release-specific symbols live in a DLL/.so loaded by that host.
-            // If we could not fingerprint that module (adapter has no 'modules'
-            // request, or its symbols were not reported as loaded yet), the
-            // content hash above is the host's - identical for every release -
-            // so two different releases would collapse onto the same signature
-            // and the newer release would reuse the previous release's cached
-            // symbols. The names line up across releases so this went unnoticed,
-            // but the *line numbers* shifted, sending "Go to Definition" to the
-            // wrong line. Disable caching in this case so the symbol table (and
-            // its line numbers) is always re-read from the live target instead
-            // of being served from another release's stale cache.
-            const isAttach = cfg.request === 'attach';
-            if (isAttach && modulesHash === undefined) {
-                return undefined;
-            }
-
-            return [
-                `v${SYMBOL_CACHE_VERSION}`,
-                binPath,
-                bytes.byteLength,
-                contentHash,
-                modulesHash ?? 'nomod',
-                includeNonDebugging ? 'nd1' : 'nd0'
-            ].join('|');
-        } catch {
-            // Binary not on the local filesystem (remote target etc.): skip cache.
-            return undefined;
-        }
-    }
-
-    /**
-     * Identity of the loaded modules (shared libraries / DLLs) that carry the
-     * debug symbols, queried through the DAP 'modules' request. Only modules
-     * whose symbols are actually loaded are considered (the release DLLs); they
-     * are content-hashed so a swapped release DLL changes the signature. Modules
-     * without symbols are ignored on purpose: a live host process loads a large,
-     * volatile set of them that would otherwise change the signature every run.
-     * Returns undefined when the adapter does not support the request or reports
-     * no symbol-bearing modules, in which case the caller falls back to the
-     * program-only signature.
-     */
-    private async modulesSignature(
-        session: vscode.DebugSession,
-        programPath: string
-    ): Promise<string | undefined> {
-        let modules: Array<Record<string, unknown>>;
-        try {
-            const resp = await session.customRequest('modules', { startModule: 0, moduleCount: 0 });
-            modules = Array.isArray((resp as { modules?: unknown })?.modules)
-                ? ((resp as { modules: Array<Record<string, unknown>> }).modules)
-                : [];
-        } catch {
-            return undefined;
-        }
-        if (modules.length === 0) {
-            return undefined;
-        }
-
-        const parts: string[] = [];
-        for (const m of modules) {
-            const p = typeof m.path === 'string' ? m.path : typeof m.name === 'string' ? m.name : '';
-            if (!p) {
-                continue;
-            }
-            const symbolsLoaded =
-                typeof m.symbolStatus === 'string' && /loaded/i.test(m.symbolStatus);
-            // Only the symbol-bearing modules (the release DLLs) define the cache
-            // identity. A live host process loads a large, *volatile* set of other
-            // DLLs (system libraries, worker plug-ins) in a different order and
-            // count on every run; folding those in made the signature change every
-            // time and defeated the cache entirely. The main program is already
-            // content-hashed by the caller, so skip it here.
-            if (!symbolsLoaded || p === programPath) {
-                continue;
-            }
-            try {
-                const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(p));
-                const hash = crypto.createHash('sha1').update(bytes).digest('hex');
-                parts.push(`${p}#${bytes.byteLength}#${hash}`);
-            } catch {
-                // Not readable from disk (locked/remote): use cheap identity fields.
-                parts.push(`${p}#${String(m.version ?? '')}#${String(m.dateTimeStamp ?? '')}`);
-            }
-        }
-
-        if (parts.length === 0) {
-            return undefined;
-        }
-        // Order-independent: the module list order from GDB is not guaranteed.
-        parts.sort();
-        return crypto.createHash('sha1').update(parts.join('|')).digest('hex');
-    }
-
-    private cacheUriFor(signature: string): vscode.Uri | undefined {
-        if (!this.cacheDir) {
-            return undefined;
-        }
-        const hash = crypto.createHash('sha1').update(signature).digest('hex');
-        return vscode.Uri.joinPath(this.cacheDir, `symbols-${hash}.json`);
-    }
-
-    private async readDiskCache(
-        signature: string
-    ): Promise<{ vars: string; funcs: string } | undefined> {
-        const uri = this.cacheUriFor(signature);
-        if (!uri) {
-            return undefined;
-        }
-        try {
-            const bytes = await vscode.workspace.fs.readFile(uri);
-            const data = JSON.parse(Buffer.from(bytes).toString('utf8')) as SymbolCacheFile;
-            if (data.version !== SYMBOL_CACHE_VERSION || data.signature !== signature) {
-                return undefined;
-            }
-            if (typeof data.vars !== 'string' || typeof data.funcs !== 'string') {
-                return undefined;
-            }
-            return { vars: data.vars, funcs: data.funcs };
-        } catch {
-            return undefined;
-        }
-    }
-
-    private async writeDiskCache(signature: string, vars: string, funcs: string): Promise<void> {
-        const uri = this.cacheUriFor(signature);
-        if (!uri) {
-            return;
-        }
-        try {
-            await vscode.workspace.fs.createDirectory(this.cacheDir!);
-            const payload: SymbolCacheFile = { version: SYMBOL_CACHE_VERSION, signature, vars, funcs };
-            await vscode.workspace.fs.writeFile(uri, Buffer.from(JSON.stringify(payload), 'utf8'));
-        } catch {
-            // Caching is best-effort; ignore write failures (read-only FS etc.).
-        }
-    }
-
-    /** Recomputes the visible view from the cached table (filter/settings changed). */
+    /** Recomputes the visible view from the loaded table (filter/settings changed). */
     refreshView(): void {
-        this.rebuildView();
-        this.changeEmitter.fire();
-    }
-
-    /**
-     * Combines the source-path include/exclude settings with the automatic
-     * dSPACE-model scope into a single per-file predicate, applied while
-     * parsing a raw GDB listing (see `load`, `loadFiltered`,
-     * `reapplySourceFilters`). Doing this at parse time - rather than after the
-     * whole table is already in memory - is what keeps `allEntries` scoped to
-     * what the user asked for, so sorting, the in-memory/disk cache size and
-     * every later view rebuild only ever deal with the relevant symbols.
-     *
-     * `varsText`/`funcsText` are scanned (cheaply, without full parsing) for the
-     * set of files the listing actually contains, so the dSPACE-model scope
-     * keeps the same safety net as before: if it would hide every debugging
-     * symbol (e.g. the model's sources are not under a dSPACE tree and carry no
-     * model-name marker), it is skipped so the view is never left empty by the
-     * heuristic.
-     */
-    private computeEffectiveFileFilter(
-        varsText: string,
-        funcsText: string
-    ): ((file: string) => boolean) | undefined {
-        const cfg = vscode.workspace.getConfiguration('gdbSymbols');
-        const includePatterns = cfg.get<string[]>('sourcePathFilter', []);
-        const excludePatterns = cfg.get<string[]>('sourcePathExclude', []);
-        const sourceFilter = makeSourceFileMatcher(includePatterns, excludePatterns);
-        const hasExplicitInclude = includePatterns.some((p) => p.trim().length > 0);
-
-        let modelScope: ((file: string) => boolean) | undefined;
-        if (cfg.get<boolean>('scopeToDspaceModel', true) && !hasExplicitInclude) {
-            const scope = makeModelScopeMatcher(this.modelName);
-            const files = [...collectListingFiles(varsText), ...collectListingFiles(funcsText)];
-            if (files.some((f) => scope(f))) {
-                modelScope = scope;
-            }
-        }
-
-        if (!sourceFilter && !modelScope) {
-            return undefined;
-        }
-        return (file: string) =>
-            (!sourceFilter || sourceFilter(file)) && (!modelScope || modelScope(file));
-    }
-
-    /**
-     * Re-applies the source-path filter / dSPACE model scope to the last raw
-     * GDB listings without re-querying GDB. Those settings only decide which
-     * already-fetched source files are kept, not what GDB itself reports, so
-     * changing them should never pay for another `info variables`/`info
-     * functions` round-trip - that query is the actual multi-second cost, and
-     * it is unaffected by these settings. Falls back to a plain view refresh
-     * when no raw listing is cached yet.
-     */
-    reapplySourceFilters(): void {
-        // A GDB-regexp-filtered candidate set (see `loadFiltered`) was parsed
-        // from its own, separately scoped query and cannot be cheaply re-scoped
-        // without re-querying GDB. Drop it so the view falls back to the
-        // reparsed full table (still narrowed by the same name-filter text)
-        // until the name filter is re-entered.
-        this.filteredEntries = undefined;
-
-        if (!this.rawListings || this.loading) {
-            this.refreshView();
-            return;
-        }
-
-        const { vars, funcs } = this.rawListings;
-        const skipNonDebugging = !vscode.workspace
-            .getConfiguration('gdbSymbols')
-            .get<boolean>('includeNonDebugging', false);
-        const fileFilter = this.computeEffectiveFileFilter(vars, funcs);
-        this.allEntries = [
-            ...parseSymbolListing(vars, 'variables', { skipNonDebugging, fileFilter }),
-            ...parseSymbolListing(funcs, 'functions', { skipNonDebugging, fileFilter })
-        ].sort((a, b) => a.name.localeCompare(b.name));
         this.rebuildView();
         this.changeEmitter.fire();
     }

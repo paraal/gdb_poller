@@ -26,6 +26,11 @@
           "id": "gdbSymbols",
           "name": "Symbols (GDB)",
           "icon": "$(symbol-misc)"
+        },
+        {
+          "id": "gdbWatchpoints",
+          "name": "Watchpoints (GDB)",
+          "icon": "$(eye)"
         }
       ]
     },
@@ -36,7 +41,11 @@
       },
       {
         "view": "gdbSymbols",
-        "contents": "Browse the variables, functions, constants and types of the debugged target.\nSymbols are loaded automatically when a debug session starts and kept cached; press Enter in the filter box to run a narrower GDB query.\n[Load Symbols](command:gdbSymbols.load)"
+        "contents": "Browse the variables, functions, constants and types of the debugged target.\nSymbols are loaded automatically when a debug session starts; press Enter in the filter box to run a narrower GDB query.\n[Load Symbols](command:gdbSymbols.load)"
+      },
+      {
+        "view": "gdbWatchpoints",
+        "contents": "No watchpoints set. GDB stops execution whenever the watched expression is written, read, or either.\n[Add Watchpoint (Write)](command:gdbLiveWatch.addWatchpoint)\n[Add Watchpoint (Read)](command:gdbLiveWatch.addReadWatchpoint)\n[Add Watchpoint (Read/Write)](command:gdbLiveWatch.addAccessWatchpoint)"
       }
     ],
     "commands": [
@@ -194,6 +203,101 @@
         "category": "GDB Live Watch"
       },
       {
+        "command": "gdbLiveWatch.startRecording",
+        "title": "Start Recording (Reverse Debugging)",
+        "category": "GDB Live Watch",
+        "icon": "$(record)"
+      },
+      {
+        "command": "gdbLiveWatch.stopRecording",
+        "title": "Stop Recording",
+        "category": "GDB Live Watch",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "gdbLiveWatch.toggleRecording",
+        "title": "Toggle Recording (Reverse Debugging)",
+        "category": "GDB Live Watch"
+      },
+      {
+        "command": "gdbLiveWatch.reverseContinue",
+        "title": "Reverse Continue",
+        "category": "GDB Live Watch",
+        "icon": "$(debug-reverse-continue)"
+      },
+      {
+        "command": "gdbLiveWatch.reverseStepOver",
+        "title": "Reverse Step Over",
+        "category": "GDB Live Watch",
+        "icon": "$(debug-step-back)"
+      },
+      {
+        "command": "gdbLiveWatch.reverseStepInto",
+        "title": "Reverse Step Into",
+        "category": "GDB Live Watch"
+      },
+      {
+        "command": "gdbLiveWatch.reverseStepInstruction",
+        "title": "Reverse Step Instruction",
+        "category": "GDB Live Watch"
+      },
+      {
+        "command": "gdbLiveWatch.reverseFinish",
+        "title": "Reverse Finish (step out backwards)",
+        "category": "GDB Live Watch"
+      },
+      {
+        "command": "gdbLiveWatch.setTempBreakpointAtCursor",
+        "title": "Set Temporary Breakpoint at Cursor (GDB tbreak)",
+        "category": "GDB Live Watch",
+        "icon": "$(debug-breakpoint-unsupported)"
+      },
+      {
+        "command": "gdbLiveWatch.clearTempBreakpoints",
+        "title": "Clear Temporary Breakpoints",
+        "category": "GDB Live Watch"
+      },
+      {
+        "command": "gdbLiveWatch.toggleBreakpointGlyphs",
+        "title": "Toggle Breakpoint Location Glyphs",
+        "category": "GDB Live Watch"
+      },
+      {
+        "command": "gdbLiveWatch.addWatchpoint",
+        "title": "Add Watchpoint (Write)...",
+        "category": "GDB Live Watch",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "gdbLiveWatch.addReadWatchpoint",
+        "title": "Add Watchpoint (Read)...",
+        "category": "GDB Live Watch",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "gdbLiveWatch.addAccessWatchpoint",
+        "title": "Add Watchpoint (Read/Write)...",
+        "category": "GDB Live Watch",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "gdbLiveWatch.removeWatchpoint",
+        "title": "Remove Watchpoint",
+        "category": "GDB Live Watch",
+        "icon": "$(remove)"
+      },
+      {
+        "command": "gdbLiveWatch.toggleWatchpointEnabled",
+        "title": "Enable/Disable Watchpoint",
+        "category": "GDB Live Watch"
+      },
+      {
+        "command": "gdbLiveWatch.refreshWatchpoints",
+        "title": "Refresh Watchpoints",
+        "category": "GDB Live Watch",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "gdbSymbols.load",
         "title": "Reload Symbols",
         "category": "GDB Symbols",
@@ -245,18 +349,6 @@
         "title": "Show Source Files",
         "category": "GDB Symbols",
         "icon": "$(list-tree)"
-      },
-      {
-        "command": "gdbSymbols.configureSourcePathFilter",
-        "title": "Filter Symbols by Source Path...",
-        "category": "GDB Symbols",
-        "icon": "$(folder-opened)"
-      },
-      {
-        "command": "gdbSymbols.configureSourcePathExclude",
-        "title": "Exclude Symbols by Source Path...",
-        "category": "GDB Symbols",
-        "icon": "$(exclude)"
       },
       {
         "command": "gdbDaq.open",
@@ -375,14 +467,64 @@
           "group": "settings@1"
         },
         {
-          "command": "gdbSymbols.configureSourcePathFilter",
-          "when": "view == gdbSymbols",
-          "group": "settings@2"
+          "command": "gdbLiveWatch.toggleRecording",
+          "when": "view == gdbLiveWatch",
+          "group": "reverse@1"
         },
         {
-          "command": "gdbSymbols.configureSourcePathExclude",
-          "when": "view == gdbSymbols",
-          "group": "settings@3"
+          "command": "gdbLiveWatch.reverseContinue",
+          "when": "view == gdbLiveWatch",
+          "group": "reverse@2"
+        },
+        {
+          "command": "gdbLiveWatch.reverseStepOver",
+          "when": "view == gdbLiveWatch",
+          "group": "reverse@3"
+        },
+        {
+          "command": "gdbLiveWatch.reverseStepInto",
+          "when": "view == gdbLiveWatch",
+          "group": "reverse@4"
+        },
+        {
+          "command": "gdbLiveWatch.reverseStepInstruction",
+          "when": "view == gdbLiveWatch",
+          "group": "reverse@5"
+        },
+        {
+          "command": "gdbLiveWatch.reverseFinish",
+          "when": "view == gdbLiveWatch",
+          "group": "reverse@6"
+        },
+        {
+          "command": "gdbLiveWatch.clearTempBreakpoints",
+          "when": "view == gdbLiveWatch",
+          "group": "reverse@7"
+        },
+        {
+          "command": "gdbLiveWatch.toggleBreakpointGlyphs",
+          "when": "view == gdbLiveWatch",
+          "group": "reverse@8"
+        },
+        {
+          "command": "gdbLiveWatch.addWatchpoint",
+          "when": "view == gdbWatchpoints",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gdbLiveWatch.addReadWatchpoint",
+          "when": "view == gdbWatchpoints",
+          "group": "navigation@2"
+        },
+        {
+          "command": "gdbLiveWatch.addAccessWatchpoint",
+          "when": "view == gdbWatchpoints",
+          "group": "navigation@3"
+        },
+        {
+          "command": "gdbLiveWatch.refreshWatchpoints",
+          "when": "view == gdbWatchpoints",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -525,6 +667,41 @@
           "command": "gdbSymbols.copyName",
           "when": "view == gdbSymbols && viewItem =~ /gdbSymbols\\.symbol/",
           "group": "2_copy@1"
+        },
+        {
+          "command": "gdbLiveWatch.addWatchpoint",
+          "when": "view == gdbLiveWatch && viewItem =~ /gdbLiveWatch\\.(expression|variable)/",
+          "group": "4_watch@1"
+        },
+        {
+          "command": "gdbLiveWatch.addReadWatchpoint",
+          "when": "view == gdbLiveWatch && viewItem =~ /gdbLiveWatch\\.(expression|variable)/",
+          "group": "4_watch@2"
+        },
+        {
+          "command": "gdbLiveWatch.addAccessWatchpoint",
+          "when": "view == gdbLiveWatch && viewItem =~ /gdbLiveWatch\\.(expression|variable)/",
+          "group": "4_watch@3"
+        },
+        {
+          "command": "gdbLiveWatch.toggleWatchpointEnabled",
+          "when": "view == gdbWatchpoints",
+          "group": "inline@1"
+        },
+        {
+          "command": "gdbLiveWatch.removeWatchpoint",
+          "when": "view == gdbWatchpoints",
+          "group": "inline@2"
+        },
+        {
+          "command": "gdbLiveWatch.toggleWatchpointEnabled",
+          "when": "view == gdbWatchpoints",
+          "group": "1_modify@1"
+        },
+        {
+          "command": "gdbLiveWatch.removeWatchpoint",
+          "when": "view == gdbWatchpoints",
+          "group": "1_modify@2"
         }
       ],
       "editor/context": [
@@ -532,6 +709,29 @@
           "command": "gdbLiveWatch.addSelectionToLiveWatch",
           "when": "editorHasSelection",
           "group": "debug@1"
+        },
+        {
+          "command": "gdbLiveWatch.setTempBreakpointAtCursor",
+          "when": "editorTextFocus",
+          "group": "debug@2"
+        }
+      ],
+      "debug/toolBar": [
+        {
+          "command": "gdbLiveWatch.startRecording",
+          "when": "debugType == cppdbg && !gdbLiveWatch.recording"
+        },
+        {
+          "command": "gdbLiveWatch.stopRecording",
+          "when": "debugType == cppdbg && gdbLiveWatch.recording"
+        },
+        {
+          "command": "gdbLiveWatch.reverseContinue",
+          "when": "debugType == cppdbg && gdbLiveWatch.recording"
+        },
+        {
+          "command": "gdbLiveWatch.reverseStepOver",
+          "when": "debugType == cppdbg && gdbLiveWatch.recording"
         }
       ],
       "commandPalette": [
@@ -610,6 +810,14 @@
         {
           "command": "gdbDaq.addFromSymbol",
           "when": "false"
+        },
+        {
+          "command": "gdbLiveWatch.removeWatchpoint",
+          "when": "false"
+        },
+        {
+          "command": "gdbLiveWatch.toggleWatchpointEnabled",
+          "when": "false"
         }
       ]
     },
@@ -655,6 +863,11 @@
           "default": "",
           "description": "Optional: name of a launch.json attach configuration to reuse instead of building one from the settings above. When empty, no launch.json is needed — the cppdbg attach config is created directly from these settings."
         },
+        "gdbLiveWatch.autoAttach.fastSymbolLoad": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically enable GDB's persistent *index cache* (plus multi-core DWARF indexing and no debuginfod lookups) for one-click attach sessions. The first attach to a release builds the symbol index once; every later attach to the same binaries reuses it from disk, cutting symbol loading from tens of seconds to a few seconds — the same idea as winIDEA's persistent symbol database. The commands are prepended to `#gdbLiveWatch.autoAttach.setupCommands#` and are skipped when your setup commands already configure `index-cache`. Requires GDB 8.3+ for the cache (older GDBs safely ignore the commands)."
+        },
         "gdbLiveWatch.pollingInterval": {
           "type": "number",
           "default": 1000,
@@ -699,6 +912,24 @@
           "default": false,
           "description": "Display values in hexadecimal format (default for expressions without a per-expression format)."
         },
+        "gdbLiveWatch.record.method": {
+          "type": "string",
+          "enum": [
+            "full",
+            "btrace"
+          ],
+          "enumDescriptions": [
+            "Full instruction-level process record: exact reverse execution of every line/instruction. Heavier and needs GDB/target support (e.g. GDB's software record on x86/ARM).",
+            "Lightweight hardware branch-trace recording (Intel BTS/PT). Supports reverse-continue but not a full reverse-step of every instruction, and only on supported x86 targets."
+          ],
+          "default": "full",
+          "description": "GDB 'record' method used by 'Start Recording' for reverse debugging (reverse-continue / reverse-step / reverse-next / reverse-finish)."
+        },
+        "gdbLiveWatch.showBreakpointGlyphs": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a gutter glyph on every line the debug adapter reports as a valid breakpoint location in the active source file (DAP 'breakpointLocations' request). Does nothing if the adapter does not support that request."
+        },
         "gdbSymbols.autoLoad": {
           "type": "boolean",
           "default": true,
@@ -714,27 +945,6 @@
           "type": "boolean",
           "default": false,
           "description": "Also list symbols without debug information ('Non-debugging symbols' from the symbol file, e.g. stripped DLL exports). Disabling this also makes symbol loading faster, since that (often very large) section is skipped entirely."
-        },
-        "gdbSymbols.sourcePathFilter": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "markdownDescription": "Only keep symbols whose source file path matches one of these patterns (case-insensitive substring, or a regular expression). Applied while parsing GDB's response, so excluded files are never held in memory or written to the symbol cache; changing this re-parses the already-fetched listing instead of re-running the GDB query. Note that GDB's `info variables`/`info functions` have no file-scoping option of their own, so the query itself always enumerates the whole symbol table regardless of this setting - only a name filter (the Symbols view's filter box) can reduce that. Leave empty to show symbols from all source files. Example: `[\"Z:\\\\Code\", \"MB_ZC_Rear_vECU\"]` keeps only application/model symbols and hides compiler/runtime files (mingw, gcc, msys). Non-debugging symbols (which have no source file) are excluded while a filter is active."
-        },
-        "gdbSymbols.sourcePathExclude": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "markdownDescription": "Hide symbols whose source file path matches one of these patterns (case-insensitive substring, or a regular expression), applied after `#gdbSymbols.sourcePathFilter#` while parsing GDB's response (excluded files are never held in memory or written to the symbol cache). Changing this re-parses the already-fetched listing instead of re-running the GDB query. Example: `[\"mingw\", \"gcc\", \"msys\", \"buildroot\"]` drops compiler/runtime files. Leave empty to exclude nothing."
-        },
-        "gdbSymbols.scopeToDspaceModel": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Automatically scope the Symbols view to the loaded dSPACE model (the .dll/.vap under the dSPACE toolchain tree that carries the release-specific symbols), like pointing winIDEA at a single symbol file. Applied while parsing GDB's response, same as `#gdbSymbols.sourcePathFilter#`. Source files under the dSPACE tree or matching the detected model name are kept; volatile system/runtime files are hidden. Ignored when `#gdbSymbols.sourcePathFilter#` is set (your explicit filter takes over), and automatically skipped if it would hide every symbol."
         },
         "gdbSymbols.settlePollMs": {
           "type": "number",

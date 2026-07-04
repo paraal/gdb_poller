@@ -9,6 +9,11 @@ import { SymbolNode, SymbolTreeProvider } from './symbolsProvider';
 import { DaqEngine } from './daq';
 import { DaqPanelManager } from './daqPanel';
 import { attachToConfiguredProcess, configureAutoAttach } from './attach';
+import { GdbCommandRunner } from './gdbConsole';
+import { ReverseDebugController, RecordMethod } from './reverseDebug';
+import { TempBreakpointManager } from './tempBreakpoints';
+import { BreakpointGlyphDecorator } from './breakpointGlyphs';
+import { Watchpoint, WatchpointKind, WatchpointManager, WatchpointTreeProvider } from './watchpoints';
 
 export function activate(context: vscode.ExtensionContext): void {
     const model = new LiveWatchModel(context.workspaceState);
@@ -18,8 +23,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const symbols = new SymbolService(
         tracker,
         poller,
-        context.workspaceState,
-        vscode.Uri.joinPath(context.globalStorageUri, 'symbol-cache')
+        context.workspaceState
     );
     const symbolsProvider = new SymbolTreeProvider(symbols);
     const daq = new DaqEngine(context.workspaceState, poller);
@@ -29,6 +33,20 @@ export function activate(context: vscode.ExtensionContext): void {
     // of source files the symbols were loaded from.
     const output = vscode.window.createOutputChannel('GDB Symbols');
     context.subscriptions.push(output);
+
+    // ---- reverse debugging, temporary breakpoints, watchpoints ------------
+    const diagOutput = vscode.window.createOutputChannel('GDB Live Watch');
+    context.subscriptions.push(diagOutput);
+    const gdbRunner = new GdbCommandRunner(tracker);
+    const reverseDebug = new ReverseDebugController(gdbRunner);
+    const tempBreakpoints = new TempBreakpointManager(gdbRunner, context);
+    const breakpointGlyphs = new BreakpointGlyphDecorator(context, diagOutput);
+    const watchpoints = new WatchpointManager(gdbRunner);
+    const watchpointsProvider = new WatchpointTreeProvider(watchpoints);
+    const watchpointsView = vscode.window.createTreeView('gdbWatchpoints', {
+        treeDataProvider: watchpointsProvider,
+        showCollapseAll: false
+    });
 
     const treeView = vscode.window.createTreeView('gdbLiveWatch', {
         treeDataProvider: provider,
@@ -141,9 +159,44 @@ export function activate(context: vscode.ExtensionContext): void {
         });
     };
 
+    // ---- reverse debugging (GDB record) status bar ------------------------
+    const recordStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 49);
+    recordStatusBar.command = 'gdbLiveWatch.toggleRecording';
+    const updateRecordStatusBar = () => {
+        const session = vscode.debug.activeDebugSession;
+        if (!session) {
+            recordStatusBar.hide();
+            return;
+        }
+        if (reverseDebug.isRecording(session.id)) {
+            recordStatusBar.text = `$(record) REC (${reverseDebug.recordMethod(session.id)})`;
+            recordStatusBar.tooltip =
+                'GDB Live Watch: process record is active — Reverse Continue/Step is available. Click to stop recording.';
+            recordStatusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+        } else {
+            recordStatusBar.text = '$(circle-large-outline) Record';
+            recordStatusBar.tooltip = 'GDB Live Watch: start process record for reverse debugging. Click to start.';
+            recordStatusBar.backgroundColor = undefined;
+        }
+        recordStatusBar.show();
+    };
+    const setRecordingContext = () => {
+        const session = vscode.debug.activeDebugSession;
+        void vscode.commands.executeCommand(
+            'setContext',
+            'gdbLiveWatch.recording',
+            !!session && reverseDebug.isRecording(session.id)
+        );
+    };
+    reverseDebug.onDidChange(() => {
+        setRecordingContext();
+        updateRecordStatusBar();
+    });
+
     const updateStatusBar = () => {
         updateExeStatusBar();
         updateAttachStatusBar();
+        updateRecordStatusBar();
         const session = vscode.debug.activeDebugSession;
         if (!session) {
             statusBar.hide();
@@ -222,6 +275,7 @@ export function activate(context: vscode.ExtensionContext): void {
     poller.onDidChangeStats(() => updateStatusBar());
     tracker.onDidChangeState(() => updateStatusBar());
     setPollingContext();
+    setRecordingContext();
     updateStatusBar();
 
     // ---- fatal sampling / adapter failures -------------------------------
@@ -322,6 +376,9 @@ export function activate(context: vscode.ExtensionContext): void {
             poller.forgetSession(s.id);
             symbols.forgetSession(s.id);
             pendingSymbolLoad.delete(s.id);
+            reverseDebug.forgetSession(s.id);
+            tempBreakpoints.forgetSession(s.id);
+            watchpoints.forgetSession(s.id);
             if (!vscode.debug.activeDebugSession) {
                 resumeDaqOnReconnect = daq.isRecording;
                 poller.stop();
@@ -345,6 +402,11 @@ export function activate(context: vscode.ExtensionContext): void {
                 tracker.getState(session.id) === 'stopped'
             ) {
                 void poller.tick();
+                // GDB may have auto-deleted a temporary breakpoint/watchpoint on
+                // this very stop (hit-once semantics); reconcile the tracked
+                // lists so their glyphs/tree entries disappear promptly.
+                void tempBreakpoints.refresh(session).catch(() => {});
+                void watchpoints.refresh(session).catch(() => {});
             }
         }),
         vscode.workspace.onDidChangeConfiguration((e) => {
@@ -353,24 +415,12 @@ export function activate(context: vscode.ExtensionContext): void {
                 updateStatusBar();
             }
             if (e.affectsConfiguration('gdbSymbols.maxSymbolsPerCategory')) {
-                // View setting only affects the cached table's presentation.
+                // View setting only affects the loaded table's presentation.
                 symbols.refreshView();
-            }
-            if (
-                e.affectsConfiguration('gdbSymbols.sourcePathFilter') ||
-                e.affectsConfiguration('gdbSymbols.sourcePathExclude') ||
-                e.affectsConfiguration('gdbSymbols.scopeToDspaceModel')
-            ) {
-                // These settings only decide which already-fetched source files
-                // are kept - GDB's `info variables`/`info functions` have no
-                // file-scoping option, so they cannot make that query itself any
-                // cheaper. Re-apply them to the cached raw listings (fast,
-                // in-memory re-parse) instead of re-running the expensive query.
-                symbols.reapplySourceFilters();
             }
             if (e.affectsConfiguration('gdbSymbols.includeNonDebugging')) {
                 // The non-debugging section is now skipped at parse time, so a
-                // change requires re-reading the symbol table from GDB/cache.
+                // change requires re-reading the symbol table from GDB.
                 const session = vscode.debug.activeDebugSession;
                 if (session && symbols.hasData) {
                     symbols.load(session, { force: true }).catch(() => {
@@ -817,49 +867,26 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('gdbSymbols.load', () => loadSymbols(true)),
 
         vscode.commands.registerCommand('gdbSymbols.search', async () => {
-            // Live filter: every keystroke narrows any already-loaded table
-            // immediately. Pressing Enter asks GDB for a filtered listing so the
-            // expensive symbol query itself can shrink for selective names.
+            // Live, local-only filter: every keystroke (and pressing Enter)
+            // narrows the already-loaded table immediately. Enter never triggers
+            // a new GDB symbol load - it just applies the current filter text.
             const previous = symbols.filter;
             const input = vscode.window.createInputBox();
             input.title = 'Filter Symbols';
             input.prompt =
-                'Type a symbol name filter. Press Enter to query GDB with the filter; closing the prompt keeps the local preview.';
+                'Type a symbol name filter. The loaded symbols are narrowed live as you type; Enter just keeps the current filter.';
             input.placeholder = 'e.g. Something, ^motor_, Adc.*Init, Rte_Read_R_FS2()';
             input.value = previous;
 
             let debounce: ReturnType<typeof setTimeout> | undefined;
-            let accepted = false;
-            const applyFilter = async (queryGdb: boolean) => {
+            const applyFilter = () => {
                 if (debounce) {
                     clearTimeout(debounce);
                     debounce = undefined;
                 }
                 const term = input.value.trim();
                 symbols.rememberFilter(term);
-                if (!queryGdb) {
-                    symbols.filter = term;
-                    return;
-                }
-                const session = vscode.debug.activeDebugSession;
-                if (!session) {
-                    symbols.filter = term;
-                    return;
-                }
-                try {
-                    if (term) {
-                        await symbols.loadFiltered(session, term, { force: true });
-                    } else {
-                        await symbols.load(session, { force: false });
-                        symbols.filter = '';
-                    }
-                } catch (e: any) {
-                    symbols.filter = term;
-                    const msg = String(e?.message ?? e).split('\n')[0];
-                    void vscode.window.showErrorMessage(
-                        `GDB Symbols: failed to query filtered symbols: ${msg}`
-                    );
-                }
+                symbols.filter = term;
             };
             input.onDidChangeValue((value) => {
                 if (debounce) {
@@ -870,14 +897,11 @@ export function activate(context: vscode.ExtensionContext): void {
                 }, 120);
             });
             input.onDidAccept(() => {
-                accepted = true;
-                void applyFilter(true);
+                applyFilter();
                 input.hide();
             });
             input.onDidHide(() => {
-                if (!accepted) {
-                    void applyFilter(false);
-                }
+                applyFilter();
                 input.dispose();
             });
             input.show();
@@ -1005,7 +1029,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 const timingLabel = timing.filter ? 'Filtered GDB query time' : 'Full load time';
                 output.appendLine(
                     `${timingLabel}: ${timing.durationMs} ms (${secs} s) for ${timing.entries} symbols` +
-                        ` — source: ${timing.fromCache ? 'disk cache' : 'GDB query'}${filterInfo}.`
+                        `${filterInfo}.`
                 );
             }
             const viewTiming = symbols.lastViewBuild;
@@ -1017,71 +1041,6 @@ export function activate(context: vscode.ExtensionContext): void {
                 );
             }
             output.show(true);
-        })
-    );
-
-    // ---- source-path filter configuration -----------------------------------
-    context.subscriptions.push(
-        vscode.commands.registerCommand('gdbSymbols.configureSourcePathFilter', async () => {
-            const cfg = vscode.workspace.getConfiguration('gdbSymbols');
-            const current = cfg.get<string[]>('sourcePathFilter', []);
-            const input = await vscode.window.showInputBox({
-                title: 'Filter Symbols by Source Path',
-                prompt:
-                    'Only show symbols whose source file matches one of these patterns ' +
-                    '(comma-separated; regex or substring). Leave empty to show all.',
-                placeHolder: 'e.g. Z:\\Code, \\GeneratedCode, MB_ZC_Rear_vECU',
-                value: current.join(', '),
-                ignoreFocusOut: true
-            });
-            if (input === undefined) {
-                return; // cancelled
-            }
-            const patterns = input
-                .split(',')
-                .map((p) => p.trim())
-                .filter((p) => p.length > 0);
-            const target = vscode.workspace.workspaceFolders?.length
-                ? vscode.ConfigurationTarget.Workspace
-                : vscode.ConfigurationTarget.Global;
-            await cfg.update('sourcePathFilter', patterns, target);
-            void vscode.window.showInformationMessage(
-                patterns.length
-                    ? `GDB Symbols: showing only symbols from ${patterns.length} source path pattern(s).`
-                    : 'GDB Symbols: source-path filter cleared — showing all symbols.'
-            );
-        })
-    );
-
-    context.subscriptions.push(
-        vscode.commands.registerCommand('gdbSymbols.configureSourcePathExclude', async () => {
-            const cfg = vscode.workspace.getConfiguration('gdbSymbols');
-            const current = cfg.get<string[]>('sourcePathExclude', []);
-            const input = await vscode.window.showInputBox({
-                title: 'Exclude Symbols by Source Path',
-                prompt:
-                    'Hide symbols whose source file matches one of these patterns ' +
-                    '(comma-separated; regex or substring). Leave empty to exclude nothing.',
-                placeHolder: 'e.g. mingw, gcc, msys, buildroot',
-                value: current.join(', '),
-                ignoreFocusOut: true
-            });
-            if (input === undefined) {
-                return; // cancelled
-            }
-            const patterns = input
-                .split(',')
-                .map((p) => p.trim())
-                .filter((p) => p.length > 0);
-            const target = vscode.workspace.workspaceFolders?.length
-                ? vscode.ConfigurationTarget.Workspace
-                : vscode.ConfigurationTarget.Global;
-            await cfg.update('sourcePathExclude', patterns, target);
-            void vscode.window.showInformationMessage(
-                patterns.length
-                    ? `GDB Symbols: excluding symbols from ${patterns.length} source path pattern(s).`
-                    : 'GDB Symbols: source-path exclusions cleared.'
-            );
         })
     );
 
@@ -1124,8 +1083,215 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
 
+    // ---- reverse debugging (GDB record / reverse-continue / reverse-step) ---
+    const requireSession = (): vscode.DebugSession | undefined => {
+        const session = vscode.debug.activeDebugSession;
+        if (!session) {
+            void vscode.window.showWarningMessage('GDB Live Watch: no active debug session.');
+        }
+        return session;
+    };
+
+    const reportFailure = (action: string, e: unknown) => {
+        const msg = String((e as Error)?.message ?? e).split('\n')[0];
+        void vscode.window.showErrorMessage(`GDB Live Watch: ${action}: ${msg}`);
+    };
+
+    const reverseCommand = (
+        run: (session: vscode.DebugSession) => Promise<void>,
+        action: string
+    ) => async () => {
+        const session = requireSession();
+        if (!session) {
+            return;
+        }
+        try {
+            await run(session);
+        } catch (e) {
+            reportFailure(action, e);
+        }
+    };
+
     context.subscriptions.push(
-        treeView, symbolsView, statusBar, exeStatusBar, attachStatusBar, model, tracker, poller, symbols, daq, daqPanel
+        vscode.commands.registerCommand('gdbLiveWatch.startRecording', async () => {
+            const session = requireSession();
+            if (!session) {
+                return;
+            }
+            const method = vscode.workspace
+                .getConfiguration('gdbLiveWatch')
+                .get<RecordMethod>('record.method', 'full');
+            try {
+                await reverseDebug.startRecording(session, method);
+            } catch (e) {
+                reportFailure('failed to start recording', e);
+            }
+        }),
+
+        vscode.commands.registerCommand(
+            'gdbLiveWatch.stopRecording',
+            reverseCommand((s) => reverseDebug.stopRecording(s), 'failed to stop recording')
+        ),
+
+        vscode.commands.registerCommand('gdbLiveWatch.toggleRecording', async () => {
+            const session = requireSession();
+            if (!session) {
+                return;
+            }
+            await vscode.commands.executeCommand(
+                reverseDebug.isRecording(session.id) ? 'gdbLiveWatch.stopRecording' : 'gdbLiveWatch.startRecording'
+            );
+        }),
+
+        vscode.commands.registerCommand(
+            'gdbLiveWatch.reverseContinue',
+            reverseCommand((s) => reverseDebug.reverseContinue(s), 'reverse continue failed')
+        ),
+        vscode.commands.registerCommand(
+            'gdbLiveWatch.reverseStepOver',
+            reverseCommand((s) => reverseDebug.reverseNext(s), 'reverse step over failed')
+        ),
+        vscode.commands.registerCommand(
+            'gdbLiveWatch.reverseStepInto',
+            reverseCommand((s) => reverseDebug.reverseStep(s), 'reverse step into failed')
+        ),
+        vscode.commands.registerCommand(
+            'gdbLiveWatch.reverseStepInstruction',
+            reverseCommand((s) => reverseDebug.reverseStepInstruction(s), 'reverse step instruction failed')
+        ),
+        vscode.commands.registerCommand(
+            'gdbLiveWatch.reverseFinish',
+            reverseCommand((s) => reverseDebug.reverseFinish(s), 'reverse finish failed')
+        )
+    );
+
+    // ---- temporary breakpoints (GDB tbreak) ----------------------------------
+    context.subscriptions.push(
+        vscode.commands.registerCommand('gdbLiveWatch.setTempBreakpointAtCursor', async () => {
+            const session = requireSession();
+            if (!session) {
+                return;
+            }
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+                void vscode.window.showWarningMessage(
+                    'GDB Live Watch: open a source file and place the cursor on the line first.'
+                );
+                return;
+            }
+            try {
+                await tempBreakpoints.setAtCursor(session, editor);
+            } catch (e) {
+                reportFailure('failed to set temporary breakpoint', e);
+            }
+        }),
+
+        vscode.commands.registerCommand('gdbLiveWatch.clearTempBreakpoints', async () => {
+            const session = requireSession();
+            if (!session) {
+                return;
+            }
+            try {
+                await tempBreakpoints.clearAll(session);
+            } catch (e) {
+                reportFailure('failed to clear temporary breakpoints', e);
+            }
+        }),
+
+        vscode.commands.registerCommand('gdbLiveWatch.toggleBreakpointGlyphs', async () => {
+            const cfg = vscode.workspace.getConfiguration('gdbLiveWatch');
+            await cfg.update(
+                'showBreakpointGlyphs',
+                !cfg.get<boolean>('showBreakpointGlyphs', true),
+                vscode.ConfigurationTarget.Workspace
+            );
+        })
+    );
+
+    // ---- watchpoints (GDB watch / rwatch / awatch) ---------------------------
+    const promptWatchExpression = async (node?: WatchNode): Promise<string | undefined> => {
+        const initial = node?.expression || node?.name;
+        if (initial) {
+            return initial;
+        }
+        return vscode.window.showInputBox({
+            prompt: 'Expression to watch (GDB stops when it changes / is read / either)',
+            placeHolder: 'e.g. myGlobal, myStruct.counter, *ptr, foo > 0'
+        });
+    };
+
+    const addWatchpointCommand = (kind: WatchpointKind) => async (node?: WatchNode) => {
+        const session = requireSession();
+        if (!session) {
+            return;
+        }
+        const expression = await promptWatchExpression(node);
+        if (!expression?.trim()) {
+            return;
+        }
+        try {
+            await watchpoints.add(session, expression.trim(), kind);
+        } catch (e) {
+            reportFailure(`failed to add ${kind} watchpoint on '${expression}'`, e);
+        }
+    };
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('gdbLiveWatch.addWatchpoint', addWatchpointCommand('write')),
+        vscode.commands.registerCommand('gdbLiveWatch.addReadWatchpoint', addWatchpointCommand('read')),
+        vscode.commands.registerCommand('gdbLiveWatch.addAccessWatchpoint', addWatchpointCommand('access')),
+
+        vscode.commands.registerCommand('gdbLiveWatch.removeWatchpoint', async (wp: Watchpoint) => {
+            const session = requireSession();
+            if (!session || !wp) {
+                return;
+            }
+            try {
+                await watchpoints.remove(session, wp);
+            } catch (e) {
+                reportFailure(`failed to remove watchpoint on '${wp.expression}'`, e);
+            }
+        }),
+
+        vscode.commands.registerCommand('gdbLiveWatch.toggleWatchpointEnabled', async (wp: Watchpoint) => {
+            const session = requireSession();
+            if (!session || !wp) {
+                return;
+            }
+            try {
+                await watchpoints.setEnabled(session, wp, !wp.enabled);
+            } catch (e) {
+                reportFailure(`failed to ${wp.enabled ? 'disable' : 'enable'} watchpoint`, e);
+            }
+        }),
+
+        vscode.commands.registerCommand('gdbLiveWatch.refreshWatchpoints', async () => {
+            const session = requireSession();
+            if (!session) {
+                return;
+            }
+            await watchpoints.refresh(session).catch((e) => reportFailure('failed to refresh watchpoints', e));
+        })
+    );
+
+    context.subscriptions.push(
+        treeView,
+        symbolsView,
+        watchpointsView,
+        statusBar,
+        exeStatusBar,
+        attachStatusBar,
+        recordStatusBar,
+        model,
+        tracker,
+        poller,
+        symbols,
+        daq,
+        daqPanel,
+        reverseDebug,
+        tempBreakpoints,
+        breakpointGlyphs,
+        watchpoints
     );
 }
 
