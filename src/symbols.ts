@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
 import { DebugSessionTracker } from './tracker';
 import { Poller } from './poller';
 
@@ -24,37 +25,6 @@ export interface SymbolEntry {
     /** Set for symbols from the "Non-debugging symbols:" section. */
     address?: string;
     nonDebugging?: boolean;
-}
-
-/**
- * True when a path points inside a dSPACE toolchain folder (VEOS, etc.). Used to
- * single out the dSPACE model modules (the .dll/.vap that actually carry the
- * release-specific debug symbols) from the many system DLLs a host process loads.
- */
-export function isDspacePath(p: string | undefined): boolean {
-    return !!p && /[\\/]dspace[\\/]/i.test(p);
-}
-
-/**
- * Derives the dSPACE model name (e.g. "MB_ZC_Rear_vECU") from a set of loaded
- * modules by picking the dSPACE-folder module that carries the symbols. A `.dll`
- * under the dSPACE tree is preferred; a `.vap` is used as a fallback. Returns the
- * basename without extension, or undefined when no dSPACE module is present.
- */
-export function dspaceModelName(
-    modules: Array<{ name?: string; path?: string }>
-): string | undefined {
-    const dspace = modules.filter((m) => isDspacePath(m.path) || isDspacePath(m.name));
-    const pick =
-        dspace.find((m) => /\.dll$/i.test(m.path ?? m.name ?? '')) ??
-        dspace.find((m) => /\.vap$/i.test(m.path ?? m.name ?? '')) ??
-        dspace[0];
-    const source = pick?.path ?? pick?.name;
-    if (!source) {
-        return undefined;
-    }
-    const base = source.split(/[\\/]/).pop() ?? source;
-    return base.replace(/\.[^.]+$/, '');
 }
 
 /** Expression to use when adding a symbol to the watch panel. */
@@ -241,75 +211,35 @@ function makeMatcher(filter: string): (name: string) => boolean {
     return (name) => matchers.some((m) => m(name));
 }
 
-function escapeGdbRegexLiteral(value: string): string {
-    return value.replace(/[\\.^$*+?()[\]{}|]/g, '\\$&');
-}
-
-/**
- * Builds the regexp passed to GDB's `info variables/functions REGEXP` form.
- * For plain symbol names and pasted declarations/calls, use a literal symbol
- * token so GDB can reduce the listing at the source. For explicit regex-looking
- * filters, keep the user's expression and let the local matcher apply the final
- * semantics after GDB has returned the narrower candidate set.
- */
-function makeGdbNameRegexp(filter: string): string | undefined {
-    const strippedCall = filter.replace(/\s*\([^)]*\)\s*$/, '').trim();
-    const candidate = strippedCall || filter.trim();
-    if (!candidate || /[\r\n]/.test(candidate)) {
-        return undefined;
-    }
-
-    const hasRegexMeta = /[\\.^$*+?()[\]{}|]/.test(candidate);
-    if (hasRegexMeta) {
-        try {
-            new RegExp(candidate);
-            return candidate;
-        } catch {
-            return escapeGdbRegexLiteral(candidate);
-        }
-    }
-
-    const identifiers = candidate.match(/[A-Za-z_~][A-Za-z0-9_:~]*/g);
-    const token = identifiers?.[identifiers.length - 1] ?? candidate;
-    return escapeGdbRegexLiteral(token);
-}
-
 /**
  * Loads the target's symbol table (variables, functions, constants, types)
  * through GDB console commands, similar to winIDEA's Symbol Browser.
  *
- * The raw GDB listings are fetched fresh from GDB on every load. Name filters
- * can also run a narrower GDB regexp query through {@link loadFiltered}.
+ * The complete table is loaded once per debug session and cached; filtering
+ * only recomputes the visible view locally, without talking to GDB again.
  */
 const FAVORITES_KEY = 'gdbSymbols.favorites';
 const FILTER_HISTORY_KEY = 'gdbSymbols.filterHistory';
 const MAX_FILTER_HISTORY = 20;
 
-export interface SymbolLoadTiming {
-    durationMs: number;
-    entries: number;
-    /** Present when the last GDB query loaded only names matching this filter. */
-    filter?: string;
-    /** The regexp sent to GDB for a filtered query. */
-    gdbRegexp?: string;
-}
+/** Bumped whenever the on-disk cache format or the parser output changes. */
+const SYMBOL_CACHE_VERSION = 3;
 
-interface FilteredSymbolSet {
-    sessionId: string;
-    filter: string;
-    gdbRegexp: string;
+/** Persisted shape of a cached symbol table on disk. */
+interface SymbolCacheFile {
+    version: number;
+    /** Identity of the binary the table was parsed from. */
+    signature: string;
     entries: SymbolEntry[];
 }
 
 export class SymbolService implements vscode.Disposable {
-    /**
-     * Symbol table as parsed from GDB (sorted by name).
-     */
+    /** Complete, unfiltered symbol table as loaded from GDB (sorted by name). */
     private allEntries: SymbolEntry[] = [];
-    /** Candidate set loaded through `info variables/functions REGEXP` for the active filter. */
-    private filteredEntries?: FilteredSymbolSet;
-    /** Session the loaded table belongs to. */
+    /** Session the cached table belongs to. */
     private loadedSessionId?: string;
+    /** Identity of the binary the in-memory table was parsed from. */
+    private loadedSignature?: string;
     /** Visible (filtered, capped) view, per category. */
     private readonly entries = new Map<SymbolCategory, SymbolEntry[]>();
     private readonly truncatedCategories = new Set<SymbolCategory>();
@@ -324,36 +254,14 @@ export class SymbolService implements vscode.Disposable {
     private _filter = '';
     loading = false;
 
-    /**
-     * Timing of the most recent symbol load (GDB query), for performance
-     * comparison. Undefined until the first load.
-     */
-    private _lastLoad?: SymbolLoadTiming;
-
-    get lastLoad(): SymbolLoadTiming | undefined {
-        return this._lastLoad;
-    }
-
-    /**
-     * Timing of the most recent local view rebuild (filter / settings applied to
-     * the already-loaded table). Unlike `lastLoad` this updates on every filter
-     * change, so it reflects the cost of the *current* filter rather than the
-     * one-time symbol load. `visible` is the number of symbols left after
-     * filtering. Undefined until the first view is built.
-     */
-    private _lastViewBuild?: { durationMs: number; visible: number };
-
-    get lastViewBuild(): { durationMs: number; visible: number } | undefined {
-        return this._lastViewBuild;
-    }
-
     private readonly changeEmitter = new vscode.EventEmitter<void>();
     readonly onDidChange = this.changeEmitter.event;
 
     constructor(
         private readonly tracker: DebugSessionTracker,
         private readonly poller: Poller,
-        private readonly state: vscode.Memento
+        private readonly state: vscode.Memento,
+        private readonly cacheDir?: vscode.Uri
     ) {
         this.favorites = new Set(state.get<string[]>(FAVORITES_KEY, []));
     }
@@ -398,7 +306,7 @@ export class SymbolService implements vscode.Disposable {
         void this.state.update(FILTER_HISTORY_KEY, history.slice(0, MAX_FILTER_HISTORY));
     }
 
-    /** Local filter (regex or substring) applied to the loaded table - instant. */
+    /** Local filter (regex or substring) applied to the cached table - instant. */
     get filter(): string {
         return this._filter;
     }
@@ -406,16 +314,13 @@ export class SymbolService implements vscode.Disposable {
     set filter(value: string) {
         if (this._filter !== value) {
             this._filter = value;
-            if (!value || this.filteredEntries?.filter !== value) {
-                this.filteredEntries = undefined;
-            }
             this.refreshView();
         }
     }
 
     /** True once a symbol table has been loaded for some session. */
     get hasData(): boolean {
-        return this.allEntries.length > 0 || this.filteredEntries !== undefined;
+        return this.loadedSessionId !== undefined;
     }
 
     isLoadedFor(sessionId: string): boolean {
@@ -430,92 +335,10 @@ export class SymbolService implements vscode.Disposable {
         return this.truncatedCategories.has(category);
     }
 
-    /**
-     * Distinct source files (compilation units) that provide the loaded symbols,
-     * with the number of variables and functions each contributes. Computed from
-     * the currently loaded table - after the source-path filter / dSPACE model
-     * scope, but before the name filter and the per-category cap - so it
-     * reflects what was actually kept from GDB's response, not just the
-     * currently visible (name-filtered/capped) view. Non-debugging symbols
-     * (which have no source file) are grouped under a single "no source file"
-     * bucket.
-     */
-    getSourceFileSummary(): Array<{
-        file: string;
-        variables: number;
-        functions: number;
-        total: number;
-    }> {
-        const counts = new Map<string, { variables: number; functions: number }>();
-        for (const entry of this.activeEntries()) {
-            const key = entry.file ?? '(no source file)';
-            let rec = counts.get(key);
-            if (!rec) {
-                rec = { variables: 0, functions: 0 };
-                counts.set(key, rec);
-            }
-            if (entry.category === 'functions') {
-                rec.functions++;
-            } else {
-                rec.variables++;
-            }
-        }
-        return [...counts.entries()]
-            .map(([file, c]) => ({
-                file,
-                variables: c.variables,
-                functions: c.functions,
-                total: c.variables + c.functions
-            }))
-            .sort((a, b) => a.file.localeCompare(b.file));
-    }
-
-    /**
-     * The modules (main executable + shared libraries / DLLs) the debug adapter
-     * reports as loaded into the target, together with where their debug symbols
-     * came from. This is what GDB actually reads the source-file names and line
-     * numbers out of. Requires a live session; returns an empty list when the
-     * adapter does not support the DAP 'modules' request.
-     *
-     * Only the dSPACE model modules (the .dll/.vap under the dSPACE toolchain
-     * tree that carry the release-specific debug symbols) are returned — the many
-     * volatile system DLLs a host process loads are filtered out so the symbol
-     * source view reflects only the dSPACE model.
-     */
-    async getModules(session: vscode.DebugSession): Promise<
-        Array<{ name: string; path?: string; symbolStatus?: string; symbolFilePath?: string }>
-    > {
-        try {
-            const resp = await session.customRequest('modules', { startModule: 0, moduleCount: 0 });
-            const modules = Array.isArray((resp as { modules?: unknown })?.modules)
-                ? (resp as { modules: Array<Record<string, unknown>> }).modules
-                : [];
-            return modules
-                .map((m) => ({
-                    name: typeof m.name === 'string' ? m.name : String(m.id ?? ''),
-                    path: typeof m.path === 'string' ? m.path : undefined,
-                    symbolStatus: typeof m.symbolStatus === 'string' ? m.symbolStatus : undefined,
-                    symbolFilePath:
-                        typeof m.symbolFilePath === 'string' ? m.symbolFilePath : undefined
-                }))
-                .filter((m) => isDspacePath(m.path) || isDspacePath(m.name));
-        } catch {
-            return [];
-        }
-    }
-
-    /**
-     * The dSPACE model name (e.g. "MB_ZC_Rear_vECU") derived from the loaded
-     * dSPACE module carrying the symbols, or undefined when none is present.
-     */
-    async getDspaceModelName(session: vscode.DebugSession): Promise<string | undefined> {
-        return dspaceModelName(await this.getModules(session));
-    }
-
     clear(): void {
         this.allEntries = [];
-        this.filteredEntries = undefined;
         this.loadedSessionId = undefined;
+        this.loadedSignature = undefined;
         this.entries.clear();
         this.truncatedCategories.clear();
         this.changeEmitter.fire();
@@ -523,18 +346,19 @@ export class SymbolService implements vscode.Disposable {
 
     forgetSession(sessionId: string): void {
         this.prefixCache.delete(sessionId);
-        if (this.filteredEntries?.sessionId === sessionId) {
-            this.filteredEntries = undefined;
-        }
         if (this.loadedSessionId === sessionId) {
             this.loadedSessionId = undefined;
+            this.loadedSignature = undefined;
         }
     }
 
     /**
-     * Loads the complete symbol table by querying GDB. The listing is always
-     * fetched fresh from GDB, so every release (and every reload) reflects the
-     * current target's symbols and line numbers.
+     * Loads the complete symbol table. Skipped when the table is already cached
+     * in memory for this session, unless `force` is set (explicit reload).
+     *
+     * On a cold load it first tries an on-disk cache keyed by the target binary's
+     * identity (path + content hash + settings); a hit avoids talking to GDB
+     * entirely. On a miss it queries GDB and writes the result back to disk.
      */
     async load(session: vscode.DebugSession, options?: { force?: boolean }): Promise<void> {
         if (this.loading) {
@@ -542,151 +366,231 @@ export class SymbolService implements vscode.Disposable {
         }
         this.loading = true;
         let started = false;
-        const loadStart = Date.now();
         try {
-            const cfg = vscode.workspace.getConfiguration('gdbSymbols');
-            const includeNonDebugging = cfg.get<boolean>('includeNonDebugging', false);
+            const includeNonDebugging = vscode.workspace
+                .getConfiguration('gdbSymbols')
+                .get<boolean>('includeNonDebugging', false);
+            const signature = await this.binarySignature(session, includeNonDebugging);
+
+            // In-memory fast path: reuse the cached table only when it belongs to
+            // this session *and* was parsed from the same binary. Comparing the
+            // signature ensures a different release (a rebuilt or swapped binary,
+            // even at the same path) is reloaded instead of being masked by the
+            // previously cached symbols.
+            if (
+                !options?.force &&
+                this.isLoadedFor(session.id) &&
+                this.allEntries.length > 0 &&
+                this.loadedSignature === signature
+            ) {
+                return;
+            }
 
             started = true;
             this.changeEmitter.fire();
 
-            const skipNonDebugging = !includeNonDebugging;
+            // Disk fast path: reuse a previously parsed table for the same binary.
+            if (!options?.force && signature) {
+                const cached = await this.readDiskCache(signature);
+                if (cached) {
+                    this.allEntries = cached;
+                    this.loadedSessionId = session.id;
+                    this.loadedSignature = signature;
+                    this.rebuildView();
+                    return;
+                }
+            }
 
+            const skipNonDebugging = !includeNonDebugging;
             const [vars, funcs] = await this.poller.runReadOperation(session, async () => {
-                // Ask GDB to omit non-debugging (minimal) symbols with '-n' when
-                // the user does not want them. On a host process that loads many
-                // system DLLs those minimal symbols dominate the listing;
-                // dropping them at the source (rather than client-side after
-                // parsing) means GDB emits far less text and the DAP round-trip
-                // is correspondingly faster.
-                const v = await this.execInfoListing(session, 'info variables', skipNonDebugging);
-                const f = await this.execInfoListing(session, 'info functions', skipNonDebugging);
+                const v = await this.execConsole(session, 'info variables');
+                const f = await this.execConsole(session, 'info functions');
                 return [v, f];
             });
-            const listing = { vars, funcs };
 
             this.allEntries = [
-                ...parseSymbolListing(listing.vars, 'variables', { skipNonDebugging }),
-                ...parseSymbolListing(listing.funcs, 'functions', { skipNonDebugging })
+                ...parseSymbolListing(vars, 'variables', { skipNonDebugging }),
+                ...parseSymbolListing(funcs, 'functions', { skipNonDebugging })
             ].sort((a, b) => a.name.localeCompare(b.name));
-            this.filteredEntries = undefined;
             this.loadedSessionId = session.id;
+            this.loadedSignature = signature;
             this.rebuildView();
 
-            this._lastLoad = {
-                durationMs: Date.now() - loadStart,
-                entries: this.allEntries.length
-            };
+            if (signature) {
+                void this.writeDiskCache(signature, this.allEntries);
+            }
         } finally {
             this.loading = false;
             if (started) {
                 this.changeEmitter.fire();
             }
+        }
+    }
+
+    // ---- on-disk symbol cache ----------------------------------------------
+
+    /**
+     * Builds a stable identity string for the binary being debugged, combining
+     * its path, a hash of its contents, the identity of the loaded modules and
+     * the settings that affect parsing. The content hash (not size/mtime) is
+     * what distinguishes two releases, so a rebuilt or swapped binary is always
+     * re-parsed. Returns undefined when no binary path is known (then caching is
+     * disabled).
+     *
+     * The main `program` alone is not enough when attaching: in an attach setup
+     * the `program` is often a generic *host* process (e.g. VeosVpuHost.exe) that
+     * stays byte-for-byte identical across releases, while the release-specific
+     * symbols live in a DLL/shared object loaded by that host. Hashing only the
+     * host executable therefore made every release collide on the same signature
+     * and reuse the first release's cached symbols. Folding in the loaded modules
+     * (the DLLs that actually carry the debug symbols) makes each release map to
+     * its own cache entry.
+     */
+    private async binarySignature(
+        session: vscode.DebugSession,
+        includeNonDebugging: boolean
+    ): Promise<string | undefined> {
+        if (!this.cacheDir) {
+            return undefined;
+        }
+        const cfg = session.configuration as { program?: string; executable?: string };
+        const binPath = cfg.program ?? cfg.executable;
+        if (!binPath) {
+            return undefined;
+        }
+        try {
+            // Hash the actual binary contents rather than trusting size + mtime.
+            // Two different releases can share the same size (firmware images are
+            // often padded to a fixed flash layout) and the same mtime (preserved
+            // on copy/extract, or coarse filesystem granularity), which made a new
+            // release silently reuse the previous release's cached symbols. A
+            // content hash is the only reliable way to tell two binaries apart.
+            const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(binPath));
+            const contentHash = crypto.createHash('sha1').update(bytes).digest('hex');
+            const modulesHash = await this.modulesSignature(session, binPath);
+            return [
+                `v${SYMBOL_CACHE_VERSION}`,
+                binPath,
+                bytes.byteLength,
+                contentHash,
+                modulesHash ?? 'nomod',
+                includeNonDebugging ? 'nd1' : 'nd0'
+            ].join('|');
+        } catch {
+            // Binary not on the local filesystem (remote target etc.): skip cache.
+            return undefined;
         }
     }
 
     /**
-     * Loads only symbols whose names match the filter by using GDB's
-     * `info variables/functions REGEXP` form. This is intentionally separate
-     * from the full-table load: a filtered query can be much cheaper for a
-     * selective name, while clearing the filter returns to the complete table
-     * by re-querying GDB.
+     * Identity of the loaded modules (shared libraries / DLLs) that carry the
+     * debug symbols, queried through the DAP 'modules' request. Only modules
+     * whose symbols are actually loaded are considered (the release DLLs); they
+     * are content-hashed so a swapped release DLL changes the signature. Modules
+     * without symbols are ignored on purpose: a live host process loads a large,
+     * volatile set of them that would otherwise change the signature every run.
+     * Returns undefined when the adapter does not support the request or reports
+     * no symbol-bearing modules, in which case the caller falls back to the
+     * program-only signature.
      */
-    async loadFiltered(
+    private async modulesSignature(
         session: vscode.DebugSession,
-        filter: string,
-        options?: { force?: boolean }
-    ): Promise<void> {
-        const term = filter.trim();
-        if (!term) {
-            this.filteredEntries = undefined;
-            this.filter = '';
-            await this.load(session, options);
-            return;
-        }
-
-        const gdbRegexp = makeGdbNameRegexp(term);
-        if (!gdbRegexp) {
-            this.filter = term;
-            return;
-        }
-
-        if (this.loading) {
-            this.filter = term;
-            return;
-        }
-        this.loading = true;
-        let started = false;
-        const loadStart = Date.now();
+        programPath: string
+    ): Promise<string | undefined> {
+        let modules: Array<Record<string, unknown>>;
         try {
-            const cfg = vscode.workspace.getConfiguration('gdbSymbols');
-            const includeNonDebugging = cfg.get<boolean>('includeNonDebugging', false);
-            const skipNonDebugging = !includeNonDebugging;
+            const resp = await session.customRequest('modules', { startModule: 0, moduleCount: 0 });
+            modules = Array.isArray((resp as { modules?: unknown })?.modules)
+                ? ((resp as { modules: Array<Record<string, unknown>> }).modules)
+                : [];
+        } catch {
+            return undefined;
+        }
+        if (modules.length === 0) {
+            return undefined;
+        }
 
-            started = true;
-            this.changeEmitter.fire();
-
-            const [vars, funcs] = await this.poller.runReadOperation(session, async () => {
-                const v = await this.execInfoListing(
-                    session,
-                    'info variables',
-                    skipNonDebugging,
-                    gdbRegexp
-                );
-                const f = await this.execInfoListing(
-                    session,
-                    'info functions',
-                    skipNonDebugging,
-                    gdbRegexp
-                );
-                return [v, f];
-            });
-
-            const entries = [
-                ...parseSymbolListing(vars, 'variables', { skipNonDebugging }),
-                ...parseSymbolListing(funcs, 'functions', { skipNonDebugging })
-            ].sort((a, b) => a.name.localeCompare(b.name));
-
-            this._filter = term;
-            this.filteredEntries = {
-                sessionId: session.id,
-                filter: term,
-                gdbRegexp,
-                entries
-            };
-            this.rebuildView();
-            this._lastLoad = {
-                durationMs: Date.now() - loadStart,
-                entries: entries.length,
-                filter: term,
-                gdbRegexp
-            };
-        } finally {
-            this.loading = false;
-            if (started) {
-                this.changeEmitter.fire();
+        const parts: string[] = [];
+        for (const m of modules) {
+            const p = typeof m.path === 'string' ? m.path : typeof m.name === 'string' ? m.name : '';
+            if (!p) {
+                continue;
             }
+            const symbolsLoaded =
+                typeof m.symbolStatus === 'string' && /loaded/i.test(m.symbolStatus);
+            // Only the symbol-bearing modules (the release DLLs) define the cache
+            // identity. A live host process loads a large, *volatile* set of other
+            // DLLs (system libraries, worker plug-ins) in a different order and
+            // count on every run; folding those in made the signature change every
+            // time and defeated the cache entirely. The main program is already
+            // content-hashed by the caller, so skip it here.
+            if (!symbolsLoaded || p === programPath) {
+                continue;
+            }
+            try {
+                const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(p));
+                const hash = crypto.createHash('sha1').update(bytes).digest('hex');
+                parts.push(`${p}#${bytes.byteLength}#${hash}`);
+            } catch {
+                // Not readable from disk (locked/remote): use cheap identity fields.
+                parts.push(`${p}#${String(m.version ?? '')}#${String(m.dateTimeStamp ?? '')}`);
+            }
+        }
+
+        if (parts.length === 0) {
+            return undefined;
+        }
+        // Order-independent: the module list order from GDB is not guaranteed.
+        parts.sort();
+        return crypto.createHash('sha1').update(parts.join('|')).digest('hex');
+    }
+
+    private cacheUriFor(signature: string): vscode.Uri | undefined {
+        if (!this.cacheDir) {
+            return undefined;
+        }
+        const hash = crypto.createHash('sha1').update(signature).digest('hex');
+        return vscode.Uri.joinPath(this.cacheDir, `symbols-${hash}.json`);
+    }
+
+    private async readDiskCache(signature: string): Promise<SymbolEntry[] | undefined> {
+        const uri = this.cacheUriFor(signature);
+        if (!uri) {
+            return undefined;
+        }
+        try {
+            const bytes = await vscode.workspace.fs.readFile(uri);
+            const data = JSON.parse(Buffer.from(bytes).toString('utf8')) as SymbolCacheFile;
+            if (data.version !== SYMBOL_CACHE_VERSION || data.signature !== signature) {
+                return undefined;
+            }
+            return Array.isArray(data.entries) && data.entries.length > 0 ? data.entries : undefined;
+        } catch {
+            return undefined;
         }
     }
 
-    // ---- view rebuilding ---------------------------------------------------
+    private async writeDiskCache(signature: string, entries: SymbolEntry[]): Promise<void> {
+        const uri = this.cacheUriFor(signature);
+        if (!uri || entries.length === 0) {
+            return;
+        }
+        try {
+            await vscode.workspace.fs.createDirectory(this.cacheDir!);
+            const payload: SymbolCacheFile = { version: SYMBOL_CACHE_VERSION, signature, entries };
+            await vscode.workspace.fs.writeFile(uri, Buffer.from(JSON.stringify(payload), 'utf8'));
+        } catch {
+            // Caching is best-effort; ignore write failures (read-only FS etc.).
+        }
+    }
 
-    /** Recomputes the visible view from the loaded table (filter/settings changed). */
+    /** Recomputes the visible view from the cached table (filter/settings changed). */
     refreshView(): void {
         this.rebuildView();
         this.changeEmitter.fire();
     }
 
-    private activeEntries(): readonly SymbolEntry[] {
-        if (this.filteredEntries && this.filteredEntries.filter === this._filter) {
-            return this.filteredEntries.entries;
-        }
-        return this.allEntries;
-    }
-
     private rebuildView(): void {
-        const viewStart = Date.now();
-        const sourceEntries = this.activeEntries();
         const cfg = vscode.workspace.getConfiguration('gdbSymbols');
         const max = Math.max(1, cfg.get<number>('maxSymbolsPerCategory', 2000));
         const includeNonDebugging = cfg.get<boolean>('includeNonDebugging', false);
@@ -698,7 +602,7 @@ export class SymbolService implements vscode.Disposable {
         for (const category of SYMBOL_CATEGORIES) {
             this.entries.set(category, []);
         }
-        for (const entry of sourceEntries) {
+        for (const entry of this.allEntries) {
             if (entry.nonDebugging && !includeNonDebugging) {
                 continue;
             }
@@ -715,36 +619,6 @@ export class SymbolService implements vscode.Disposable {
             }
             list.push(entry);
         }
-
-        let visible = 0;
-        for (const list of this.entries.values()) {
-            visible += list.length;
-        }
-        this._lastViewBuild = { durationMs: Date.now() - viewStart, visible };
-    }
-
-    /**
-     * Runs an `info variables` / `info functions` listing, optionally passing the
-     * GDB `-n` flag to omit non-debugging (minimal) symbols. `-n` was added in
-     * GDB 8.1; on an older GDB the flagged command is rejected (no valid listing),
-     * so we transparently fall back to the plain command. The non-debugging
-     * symbols are then still filtered out client-side by the parser.
-     */
-    private async execInfoListing(
-        session: vscode.DebugSession,
-        command: string,
-        skipNonDebugging: boolean,
-        nameRegexp?: string
-    ): Promise<string> {
-        const regexpArg = nameRegexp ? ` ${nameRegexp}` : '';
-        if (skipNonDebugging) {
-            try {
-                return await this.execConsole(session, `${command} -n${regexpArg}`);
-            } catch {
-                // Older GDB without the '-n' flag: fall back to the plain listing.
-            }
-        }
-        return this.execConsole(session, `${command}${regexpArg}`);
     }
 
     /**
